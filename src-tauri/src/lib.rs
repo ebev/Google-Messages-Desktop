@@ -1,10 +1,46 @@
+use serde::{Deserialize, Serialize};
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WebviewUrl, WebviewWindowBuilder,
 };
+use tauri_plugin_autostart::ManagerExt;
 
 const MESSAGES_URL: &str = "https://messages.google.com/web/authentication";
+
+// User-facing settings, persisted to settings.json in the app config dir.
+// (Launch-at-login is tracked by the autostart plugin's own OS state, so it is
+// not duplicated here.)
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct Settings {
+    /// When true, the app launches with the window hidden (tray only).
+    start_in_tray: bool,
+}
+
+fn settings_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join("settings.json"))
+}
+
+fn load_settings(app: &tauri::AppHandle) -> Settings {
+    settings_path(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_settings(app: &tauri::AppHandle, settings: &Settings) {
+    if let Some(path) = settings_path(app) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(settings) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+}
 
 // On macOS & Linux the embedded WebKit view's default user-agent omits the
 // "Version/… Safari/…" token, so some Google properties (e.g. the Fi calls app)
@@ -30,14 +66,22 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
-            // Build the main window pointing at Google Messages
+            let settings = load_settings(app.handle());
+
+            // Build the main window pointing at Google Messages. If the user
+            // chose "Start in Tray", build it hidden.
             let mut builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::External(MESSAGES_URL.parse()?))
                     .title("Google Messages")
                     .inner_size(1100.0, 780.0)
                     .min_inner_size(400.0, 500.0)
                     .center()
+                    .visible(!settings.start_in_tray)
                     .initialization_script(INIT_SCRIPT);
             if let Some(ua) = USER_AGENT {
                 builder = builder.user_agent(ua);
@@ -51,7 +95,7 @@ pub fn run() {
             #[cfg(windows)]
             grant_media_permissions(&window);
 
-            build_tray(app)?;
+            build_tray(app, &settings)?;
             Ok(())
         })
         // Close the main window to tray instead of quitting; other windows
@@ -105,10 +149,41 @@ fn grant_media_permissions(window: &tauri::WebviewWindow) {
     });
 }
 
-fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+fn build_tray(app: &tauri::App, settings: &Settings) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
+
+    // Settings as checkable items. Initial check state reflects current state:
+    // autostart from the OS (via the plugin), start-in-tray from settings.json.
+    let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
+    let launch_at_login = CheckMenuItem::with_id(
+        app,
+        "autostart",
+        "Launch at Login",
+        true,
+        autostart_on,
+        None::<&str>,
+    )?;
+    let start_in_tray = CheckMenuItem::with_id(
+        app,
+        "start_in_tray",
+        "Start in Tray",
+        true,
+        settings.start_in_tray,
+        None::<&str>,
+    )?;
+
+    let menu = Menu::with_items(
+        app,
+        &[
+            &show,
+            &PredefinedMenuItem::separator(app)?,
+            &launch_at_login,
+            &start_in_tray,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
 
     TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().unwrap().clone())
@@ -124,6 +199,21 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
                 }
             }
             "quit" => app.exit(0),
+            "autostart" => {
+                // The check item has already toggled its own visual state;
+                // mirror it to the OS autostart entry.
+                let mgr = app.autolaunch();
+                if mgr.is_enabled().unwrap_or(false) {
+                    let _ = mgr.disable();
+                } else {
+                    let _ = mgr.enable();
+                }
+            }
+            "start_in_tray" => {
+                let mut s = load_settings(app);
+                s.start_in_tray = !s.start_in_tray;
+                save_settings(app, &s);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

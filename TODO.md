@@ -22,6 +22,24 @@ macOS/Windows builds):
 **Caveat:** must be compiled and verified on an actual Linux box — cannot be
 tested from macOS.
 
+## Proper settings window
+
+Current settings ("Launch at Login", "Start in Tray") live as checkable items in
+the tray menu — functional but minimal. Replace/supplement with a real settings
+window:
+
+- A dedicated webview window (its own label, e.g. `settings`) loading a local
+  HTML/JS page from `frontend/` (not the external Messages URL).
+- Surface the existing settings plus room to grow (e.g. start URL, window size
+  memory, notification toggles, theme override).
+- Bridge to Rust via `#[tauri::command]`s for get/set; persist through the
+  existing `Settings` struct + `settings.json` (extend as needed).
+- Add a "Settings…" item to the tray menu to open/focus the window; remember to
+  scope close-to-tray to the `main` label only (the settings window should close
+  normally) — same pattern already used in `on_window_event`.
+- Give the `settings` window its own capability entry (or widen `windows` in
+  `capabilities/default.json`) so its commands are permitted.
+
 ## Windows: status
 
 - DONE: auto-grant of WebView2 microphone/camera `PermissionRequested`

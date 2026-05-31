@@ -7,7 +7,8 @@ bundling Chromium, so the app stays small.
 ## Features
 
 - Native window wrapping `messages.google.com`
-- System tray icon — left-click toggles the window, right-click for **Show / Quit**
+- System tray icon — left-click toggles the window, right-click for the menu
+- Tray settings: **Launch at Login** and **Start in Tray** (start hidden)
 - Closes to tray instead of quitting; single-instance enforced
 - System notifications, even when the window is hidden
 - Follows the system light/dark theme
