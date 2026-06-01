@@ -302,6 +302,27 @@ fn set_tray_badge(app: tauri::AppHandle, count: u32) {
 //    the window is hidden
 const INIT_SCRIPT: &str = r#"
 (function () {
+    // --- DIAGNOSTIC (temporary): confirm the script runs and reveal what the
+    // Account button actually is. Open DevTools (F12 / right-click -> Inspect)
+    // and watch the Console while clicking links. ---
+    console.log('[gm] init script loaded. UA=', navigator.userAgent);
+    document.addEventListener('click', function (e) {
+        try {
+            var path = e.composedPath ? e.composedPath() : [];
+            var a = (e.target && e.target.closest) ? e.target.closest('a[href]') : null;
+            if (!a) {
+                for (var i = 0; i < path.length; i++) {
+                    if (path[i] && path[i].tagName === 'A' && path[i].getAttribute('href')) { a = path[i]; break; }
+                }
+            }
+            console.log('[gm-diag] click target=', (e.target && e.target.tagName),
+                'anchor=', a ? a.href : '(none)',
+                'target=', a ? a.target : '(n/a)');
+        } catch (err) {
+            console.log('[gm-diag] click logging error', err);
+        }
+    }, true);
+
     // --- Unread badge via title observation ---
     function parseUnread(title) {
         const m = title.match(/\((\d+)\)/);
