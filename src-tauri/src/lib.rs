@@ -68,7 +68,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -111,7 +111,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![set_tray_badge])
+        .invoke_handler(tauri::generate_handler![set_tray_badge, open_external])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -248,6 +248,17 @@ fn build_tray(app: &tauri::App, settings: &Settings) -> tauri::Result<()> {
     Ok(())
 }
 
+// Opens an external (non-Messages) URL in the OS default browser. Used for links
+// like the Google Fi account page that point outside messages.google.com — those
+// open with target="_blank" and would otherwise be dropped by the webview.
+#[tauri::command]
+fn open_external(app: tauri::AppHandle, url: String) {
+    use tauri_plugin_opener::OpenerExt;
+    if url.starts_with("https://") || url.starts_with("http://") {
+        let _ = app.opener().open_url(url, None::<&str>);
+    }
+}
+
 // Called from JS when the unread count changes
 #[tauri::command]
 fn set_tray_badge(app: tauri::AppHandle, count: u32) {
@@ -305,30 +316,52 @@ const INIT_SCRIPT: &str = r#"
         observeTitle();
     }
 
-    // --- Keep Messages / Calls / Voicemail in the same window ---
-    // The web app links between these sections with target="_blank", which the
-    // embedded webview drops (nothing happens). Intercept those and navigate in
-    // place instead, so they behave like tabs in one window.
-    function isMessagesUrl(url) {
+    // --- Route target="_blank" / window.open links ---
+    // The web app opens links with target="_blank", which the embedded webview
+    // otherwise drops (nothing happens). Handle them ourselves:
+    //   - messages.google.com (Messages / Calls / Voicemail) -> navigate in the
+    //     same window, so they behave like tabs.
+    //   - any other site (e.g. fi.google.com/account) -> open in the OS default
+    //     browser via the open_external command.
+    function parseUrl(url) {
         try {
-            return new URL(url, location.href).host === 'messages.google.com';
+            return new URL(url, location.href);
         } catch (e) {
+            return null;
+        }
+    }
+    function openExternal(href) {
+        if (window.__TAURI_INTERNALS__) {
+            window.__TAURI_INTERNALS__.invoke('open_external', { url: href });
+        }
+    }
+    // Returns true if the link was handled here.
+    function route(u) {
+        if (!u || (u.protocol !== 'https:' && u.protocol !== 'http:')) {
             return false;
         }
+        if (u.host === 'messages.google.com') {
+            window.location.assign(u.href);
+        } else {
+            openExternal(u.href);
+        }
+        return true;
     }
     // Capture phase so we beat the app's own click handlers.
     document.addEventListener('click', function (e) {
         const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
-        if (a && a.target === '_blank' && isMessagesUrl(a.href)) {
-            e.preventDefault();
-            e.stopPropagation();
-            window.location.assign(new URL(a.href, location.href).href);
+        if (a && a.target === '_blank') {
+            const u = parseUrl(a.href);
+            if (u && route(u)) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
         }
     }, true);
     const origOpen = window.open;
     window.open = function (url) {
-        if (url && isMessagesUrl(url)) {
-            window.location.assign(new URL(url, location.href).href);
+        const u = url ? parseUrl(url) : null;
+        if (u && route(u)) {
             return null;
         }
         return origOpen.apply(window, arguments);
