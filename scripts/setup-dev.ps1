@@ -94,6 +94,57 @@ try {
   Pop-Location
 }
 
-Info "Done."
-Info "Start the app with:  npm run dev"
-Warn "If cargo/node aren't found in this window, open a new terminal so PATH refreshes."
+# 5. Verify the environment is actually usable.
+Info "Verifying toolchain…"
+$ok = $true
+
+function Check-Tool($cmd, $name) {
+  $c = Get-Command $cmd -ErrorAction SilentlyContinue
+  if ($c) {
+    $ver = (& $cmd --version 2>$null | Select-Object -First 1)
+    Info "  $name : $ver"
+  } else {
+    Warn "  $name : NOT FOUND on PATH"
+    $script:ok = $false
+  }
+}
+
+Check-Tool 'rustc' 'rustc'
+Check-Tool 'cargo' 'cargo'
+Check-Tool 'node'  'node '
+Check-Tool 'npm'   'npm  '
+
+# The ARM64 and x64 MSVC linkers are separate components; make sure the one
+# matching the active Rust host triple is installed (this is what catches the
+# "linker `link.exe` not found" failure on ARM64 machines that only have x64).
+if (Get-Command rustc -ErrorAction SilentlyContinue) {
+  $hostTriple = ((& rustc -vV) | Where-Object { $_ -like 'host:*' }) -replace 'host:\s*', ''
+  if ($hostTriple -like 'aarch64*') {
+    $component = 'Microsoft.VisualStudio.Component.VC.Tools.ARM64'
+    $arch = 'ARM64'
+  } else {
+    $component = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
+    $arch = 'x64'
+  }
+  $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+  $have = $false
+  if (Test-Path $vswhere) {
+    $have = [bool](& $vswhere -products '*' -latest -requires $component -property installationPath 2>$null)
+  }
+  if ($have) {
+    Info "  MSVC linker ($arch, for $hostTriple) : present"
+  } else {
+    Warn "  MSVC $arch C++ toolset is MISSING ($component)."
+    Warn "  Rust will fail with: linker 'link.exe' not found."
+    Warn "  Install it by re-running the Build Tools installer with:  --add $component"
+    $script:ok = $false
+  }
+}
+
+Write-Host ""
+if ($ok) {
+  Info "Environment looks good. Start the app with:  npm run dev"
+} else {
+  Warn "Some checks failed (see above). Fix them, then run: npm run dev"
+  Warn "If cargo/node aren't found in this window, open a new terminal so PATH refreshes."
+}

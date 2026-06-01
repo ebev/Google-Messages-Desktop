@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skipping it whenever the Build Tools package merely exists. This was the cause
   of `error: linker 'link.exe' not found` on Windows.
 
+### Changed
+- Setup scripts now end with a verification pass: print tool versions and, on
+  Windows, confirm the MSVC linker matching the active Rust host triple is
+  present (ARM64 vs x64 are separate components) — surfacing a missing toolset
+  before the first build instead of as a cryptic linker error.
+
 ## [0.4.0] - 2026-05-31
 
 ### Added

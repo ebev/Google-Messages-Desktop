@@ -96,5 +96,35 @@ info "Installing npm dependencies…"
 cd "$PROJECT_DIR"
 npm install
 
-info "Done."
-info "Start the app with:  npm run dev"
+# 5. Verify the environment is actually usable.
+info "Verifying toolchain…"
+ok=1
+check_tool() {
+  if command -v "$1" >/dev/null 2>&1; then
+    info "  $1: $("$1" --version 2>/dev/null | head -1)"
+  else
+    warn "  $1: NOT FOUND on PATH"
+    ok=0
+  fi
+}
+check_tool cargo
+check_tool rustc
+check_tool node
+check_tool npm
+
+# A C compiler/linker is required for Rust to link.
+if command -v cc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; then
+  info "  C linker: present"
+else
+  warn "  C linker: none of cc/clang/gcc found — Rust linking will fail"
+  warn "    macOS: run 'xcode-select --install'; Linux: install build-essential / Development Tools"
+  ok=0
+fi
+
+echo
+if [ "$ok" -eq 1 ]; then
+  info "Environment looks good."
+  info "Start the app with:  npm run dev"
+else
+  warn "Some checks failed (see above). Fix them, then run: npm run dev"
+fi

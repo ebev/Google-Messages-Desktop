@@ -44,10 +44,8 @@ window:
 
 - DONE: auto-grant of WebView2 microphone/camera `PermissionRequested`
   (`grant_media_permissions` in `src-tauri/src/lib.rs`, `cfg(windows)`).
-- Validated by type-checking against the installed `tauri` / `webview2-com 0.38`
-  sources, but **not compiled/linked on Windows** from this macOS box (the
-  `tauri-winres` icon/manifest step needs `llvm-rc` or a real Windows toolchain).
-  Needs one real `cargo build` / `tauri build` on Windows to confirm.
-- Runtime: the OS toggle *Settings → Privacy → Microphone → "Let desktop apps
-  access your microphone"* must be enabled by the user. No manifest/entitlement
-  needed.
+- DONE: compiles & links on Windows (ARM64, `aarch64-pc-windows-msvc`) via
+  `npm run dev`.
+- STILL TODO: confirm mic/camera actually work in a call on Windows at runtime.
+  Requires the OS toggle *Settings → Privacy → Microphone → "Let desktop apps
+  access your microphone"* enabled. No manifest/entitlement needed.
