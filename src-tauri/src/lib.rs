@@ -188,18 +188,32 @@ fn build_tray(app: &tauri::App, settings: &Settings) -> tauri::Result<()> {
         ],
     )?;
 
-    // Dedicated transparent bubble glyph for the menu bar. Using the full app
-    // icon here would render as a solid square under `icon_as_template`, since
-    // template mode only uses the alpha channel.
+    // Tray glyph, per platform:
+    //   - macOS: a monochrome (black-on-transparent) template; the OS recolors
+    //     it for light/dark menu bars. The full app icon would render as a solid
+    //     square here, since template mode only uses the alpha channel.
+    //   - Windows/Linux: a colored bubble. Those platforms don't support
+    //     template images, so a black icon would be invisible on a dark taskbar.
+    #[cfg(target_os = "macos")]
     let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
+    #[cfg(not(target_os = "macos"))]
+    let tray_icon =
+        tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon-color.png"))?;
 
-    TrayIconBuilder::with_id("main")
+    #[allow(unused_mut)] // `tray` is only reassigned on macOS (template flag)
+    let mut tray = TrayIconBuilder::with_id("main")
         .icon(tray_icon)
-        .icon_as_template(true) // macOS: respects light/dark mode automatically
         .tooltip("Google Messages")
         .menu(&menu)
-        .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
+        .show_menu_on_left_click(false);
+
+    // Template rendering is a macOS-only concept (light/dark menu-bar tinting).
+    #[cfg(target_os = "macos")]
+    {
+        tray = tray.icon_as_template(true);
+    }
+
+    tray.on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.show();

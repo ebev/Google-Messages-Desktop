@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tauri-plugin-opener`.
 
 ### Fixed
+- Tray icon is now visible on Windows/Linux dark taskbars: those platforms don't
+  support macOS-style template icons, so the black silhouette was invisible on a
+  dark taskbar. They now use a colored bubble glyph; macOS keeps the monochrome
+  template that tints for light/dark menu bars.
 - `scripts/setup-dev.ps1` now detects the actual MSVC C++ toolset via `vswhere`
   and adds the "Desktop development with C++" workload when missing, instead of
   skipping it whenever the Build Tools package merely exists. This was the cause
