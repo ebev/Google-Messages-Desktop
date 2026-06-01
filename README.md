@@ -23,11 +23,28 @@ bundling Chromium, so the app stays small.
 
 - [Rust](https://rustup.rs)
 - [Node.js](https://nodejs.org)
+- Platform build tools (Xcode CLT on macOS, C++ Build Tools + WebView2 on
+  Windows, WebKitGTK + build deps on Linux)
+
+### Automated setup
+
+One-shot scripts install everything above and run `npm install` (idempotent —
+safe to re-run):
+
+```bash
+# macOS / Linux
+./scripts/setup-dev.sh
+```
+
+```powershell
+# Windows (run from an elevated PowerShell)
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-dev.ps1
+```
 
 ## Development
 
 ```bash
-npm install
+npm install   # if you didn't use the setup script
 npm run dev
 ```
 

@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Settings` struct + JSON load/save helpers for user preferences.
 - Project docs: `README.md`, `CHANGELOG.md`, and `TODO.md` (tracks the Linux
   audio work, Windows build verification, and a future proper settings window).
+- Developer environment setup scripts: `scripts/setup-dev.sh` (macOS/Linux) and
+  `scripts/setup-dev.ps1` (Windows) — install Rust, Node.js, and the platform
+  build prerequisites, then run `npm install`.
 
 ### Notes
 - Cold-start "reloads everything" is the Messages SPA re-initializing and
