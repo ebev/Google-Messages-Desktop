@@ -6,7 +6,10 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt;
 
-const MESSAGES_URL: &str = "https://messages.google.com/web/authentication";
+// Canonical web entry point. When already paired this lands straight on the
+// (cached) conversation list; when not paired it redirects to the QR pairing
+// page on its own. Loading the pairing sub-route directly added an extra hop.
+const MESSAGES_URL: &str = "https://messages.google.com/web/";
 
 // User-facing settings, persisted to settings.json in the app config dir.
 // (Launch-at-login is tracked by the autostart plugin's own OS state, so it is

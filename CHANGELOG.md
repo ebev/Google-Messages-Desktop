@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build prerequisites, then run `npm install`.
 
 ### Changed
+- Load `messages.google.com/web/` directly (the canonical entry) instead of the
+  `/web/authentication` pairing sub-route — when already paired this lands on the
+  cached conversation list and skips an extra redirect on startup.
 - Real app icon (blue chat bubble) replacing the blank blue square, regenerated
   for all platforms. The menu-bar tray now uses a dedicated transparent bubble
   glyph so `icon_as_template` renders a proper silhouette instead of a solid
