@@ -42,10 +42,32 @@ function Install-Winget($id, $name, $override) {
   }
 }
 
-# 1. Visual Studio C++ Build Tools — MSVC linker + Windows SDK that Rust needs.
-#    The --override ensures the "Desktop development with C++" workload is added.
-Install-Winget 'Microsoft.VisualStudio.2022.BuildTools' 'Visual Studio C++ Build Tools' `
-  '--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
+# 1. Visual Studio C++ Build Tools — MSVC linker (link.exe) + Windows SDK that
+#    Rust's MSVC toolchain needs.
+#
+#    NOTE: it's not enough for the Build Tools *package* to exist — a machine can
+#    have the installer present without the C++ workload, which leaves link.exe
+#    missing. So we detect the actual VC toolset component with vswhere and only
+#    then add the workload (modifying an existing install if needed).
+function Test-VCTools {
+  $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+  if (-not (Test-Path $vswhere)) { return $false }
+  $path = & $vswhere -products '*' -latest `
+    -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+    -property installationPath 2>$null
+  return [bool]$path
+}
+
+if (Test-VCTools) {
+  Info "Visual Studio C++ Build Tools (VC toolset) already installed"
+} else {
+  Info "Installing Visual Studio C++ Build Tools (Desktop development with C++)…"
+  # --force so winget runs the installer even if the base package is already
+  # present; --add modifies that install to include the C++ workload.
+  winget install -e --id Microsoft.VisualStudio.2022.BuildTools --force `
+    --accept-source-agreements --accept-package-agreements `
+    --override '--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
+}
 
 # 2. WebView2 runtime (usually present on Windows 11; ensure it on Windows 10).
 Install-Winget 'Microsoft.EdgeWebView2Runtime' 'WebView2 Runtime'

@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced the deprecated `tauri-plugin-shell` open path with
   `tauri-plugin-opener`.
 
+### Fixed
+- `scripts/setup-dev.ps1` now detects the actual MSVC C++ toolset via `vswhere`
+  and adds the "Desktop development with C++" workload when missing, instead of
+  skipping it whenever the Build Tools package merely exists. This was the cause
+  of `error: linker 'link.exe' not found` on Windows.
+
 ## [0.4.0] - 2026-05-31
 
 ### Added
