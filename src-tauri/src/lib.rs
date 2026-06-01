@@ -255,7 +255,12 @@ fn build_tray(app: &tauri::App, settings: &Settings) -> tauri::Result<()> {
 fn open_external(app: tauri::AppHandle, url: String) {
     use tauri_plugin_opener::OpenerExt;
     if url.starts_with("https://") || url.starts_with("http://") {
-        let _ = app.opener().open_url(url, None::<&str>);
+        eprintln!("[open_external] opening: {url}");
+        if let Err(e) = app.opener().open_url(&url, None::<&str>) {
+            eprintln!("[open_external] FAILED to open {url}: {e}");
+        }
+    } else {
+        eprintln!("[open_external] ignored non-http url: {url}");
     }
 }
 
@@ -331,8 +336,13 @@ const INIT_SCRIPT: &str = r#"
         }
     }
     function openExternal(href) {
+        console.log('[open_external] routing to OS browser:', href);
         if (window.__TAURI_INTERNALS__) {
-            window.__TAURI_INTERNALS__.invoke('open_external', { url: href });
+            window.__TAURI_INTERNALS__
+                .invoke('open_external', { url: href })
+                .catch(function (e) { console.error('[open_external] invoke failed:', e); });
+        } else {
+            console.error('[open_external] __TAURI_INTERNALS__ unavailable');
         }
     }
     // Returns true if the link was handled here.
