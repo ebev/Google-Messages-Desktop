@@ -185,8 +185,13 @@ fn build_tray(app: &tauri::App, settings: &Settings) -> tauri::Result<()> {
         ],
     )?;
 
+    // Dedicated transparent bubble glyph for the menu bar. Using the full app
+    // icon here would render as a solid square under `icon_as_template`, since
+    // template mode only uses the alpha channel.
+    let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
+
     TrayIconBuilder::with_id("main")
-        .icon(app.default_window_icon().unwrap().clone())
+        .icon(tray_icon)
         .icon_as_template(true) // macOS: respects light/dark mode automatically
         .tooltip("Google Messages")
         .menu(&menu)
