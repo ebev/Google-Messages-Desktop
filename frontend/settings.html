@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Settings</title>
+    <style>
+      :root {
+        --bg: #ffffff;
+        --fg: #1f1f1f;
+        --muted: #5f6368;
+        --border: #dadce0;
+        --accent: #1a73e8;
+        --hover: #e8f0fe;
+        --danger: #d93025;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1e1e1e;
+          --fg: #e8eaed;
+          --muted: #9aa0a6;
+          --border: #3c4043;
+          --accent: #8ab4f8;
+          --hover: #3c4043;
+          --danger: #f28b82;
+        }
+      }
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      header {
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border);
+        font-size: 18px;
+        font-weight: 600;
+      }
+      main {
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px 20px 24px;
+      }
+      .setting {
+        padding: 14px 0;
+        border-bottom: 1px solid var(--border);
+      }
+      .setting:last-child { border-bottom: none; }
+      .setting-label {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+      }
+      .setting-title { font-weight: 500; }
+      .setting-desc {
+        font-size: 13px;
+        color: var(--muted);
+        margin-top: 4px;
+        line-height: 1.4;
+      }
+      label.switch {
+        position: relative;
+        display: inline-block;
+        width: 40px;
+        height: 22px;
+        flex-shrink: 0;
+      }
+      label.switch input { opacity: 0; width: 0; height: 0; }
+      .slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: var(--border);
+        border-radius: 22px;
+        transition: background .15s ease;
+      }
+      .slider:before {
+        position: absolute;
+        content: "";
+        height: 16px;
+        width: 16px;
+        left: 3px;
+        bottom: 3px;
+        background: white;
+        border-radius: 50%;
+        transition: transform .15s ease;
+      }
+      input:checked + .slider { background: var(--accent); }
+      input:checked + .slider:before { transform: translateX(18px); }
+      input[type="text"], select {
+        width: 100%;
+        box-sizing: border-box;
+        margin-top: 8px;
+        padding: 8px 10px;
+        background: var(--bg);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        font: inherit;
+      }
+      input[type="text"]:focus, select:focus { outline: 2px solid var(--accent); }
+      .row-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 16px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border);
+      }
+      button {
+        flex: 1;
+        padding: 8px 12px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--hover);
+        color: var(--fg);
+        font: inherit;
+        cursor: pointer;
+      }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: white;
+      }
+      button.danger { color: var(--danger); }
+      .status {
+        text-align: center;
+        font-size: 13px;
+        color: var(--muted);
+        min-height: 18px;
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>Settings</header>
+    <main>
+      <div class="setting">
+        <div class="setting-label">
+          <div>
+            <div class="setting-title">Launch at login</div>
+            <div class="setting-desc">Start Google Messages automatically when you log in.</div>
+          </div>
+          <label class="switch">
+            <input id="launchAtLogin" type="checkbox" />
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="setting">
+        <div class="setting-label">
+          <div>
+            <div class="setting-title">Start in tray</div>
+            <div class="setting-desc">Hide the main window on launch and start as a tray icon only.</div>
+          </div>
+          <label class="switch">
+            <input id="startInTray" type="checkbox" />
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="setting">
+        <div class="setting-label">
+          <div>
+            <div class="setting-title">Show notifications</div>
+            <div class="setting-desc">Allow the app to display web notifications.</div>
+          </div>
+          <label class="switch">
+            <input id="showNotifications" type="checkbox" />
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="setting">
+        <label for="theme">Theme</label>
+        <select id="theme">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </div>
+
+      <div class="setting">
+        <label for="startUrl">Start URL</label>
+        <input id="startUrl" type="text" placeholder="https://messages.google.com/web/" />
+        <div class="setting-desc">URL loaded when the app launches. Defaults to Google Messages.</div>
+      </div>
+
+      <div class="row-actions">
+        <button id="cancelBtn">Cancel</button>
+        <button id="saveBtn" class="primary">Save</button>
+      </div>
+      <div id="status" class="status"></div>
+    </main>
+
+    <script>
+      const launchAtLogin = document.getElementById('launchAtLogin');
+      const startInTray = document.getElementById('startInTray');
+      const showNotifications = document.getElementById('showNotifications');
+      const theme = document.getElementById('theme');
+      const startUrl = document.getElementById('startUrl');
+      const saveBtn = document.getElementById('saveBtn');
+      const cancelBtn = document.getElementById('cancelBtn');
+      const status = document.getElementById('status');
+
+      let currentSettings = {};
+
+      function showStatus(text) {
+        status.textContent = text;
+        setTimeout(() => { status.textContent = ''; }, 2500);
+      }
+
+      function readForm() {
+        return {
+          launch_at_login: launchAtLogin.checked,
+          start_in_tray: startInTray.checked,
+          show_notifications: showNotifications.checked,
+          theme: theme.value,
+          start_url: startUrl.value.trim() || null,
+        };
+      }
+
+      function applyForm(settings) {
+        currentSettings = settings || {};
+        launchAtLogin.checked = !!currentSettings.launch_at_login;
+        startInTray.checked = !!currentSettings.start_in_tray;
+        showNotifications.checked = !!currentSettings.show_notifications;
+        theme.value = currentSettings.theme || 'system';
+        startUrl.value = currentSettings.start_url || '';
+      }
+
+      async function load() {
+        try {
+          if (window.__TAURI_INTERNALS__) {
+            const settings = await window.__TAURI_INTERNALS__.invoke('get_settings');
+            applyForm(settings);
+          } else {
+            showStatus('Tauri API not available');
+          }
+        } catch (e) {
+          console.error('Failed to load settings:', e);
+          showStatus('Failed to load settings');
+        }
+      }
+
+      async function save() {
+        try {
+          const settings = readForm();
+          if (window.__TAURI_INTERNALS__) {
+            await window.__TAURI_INTERNALS__.invoke('set_settings', { settings });
+            applyForm(settings);
+            showStatus('Saved.');
+          } else {
+            showStatus('Tauri API not available');
+          }
+        } catch (e) {
+          console.error('Failed to save settings:', e);
+          showStatus('Failed to save settings');
+        }
+      }
+
+      saveBtn.addEventListener('click', save);
+      cancelBtn.addEventListener('click', () => applyForm(currentSettings));
+
+      load();
+    </script>
+  </body>
+</html>

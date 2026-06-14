@@ -49,3 +49,11 @@ window:
 - STILL TODO: confirm mic/camera actually work in a call on Windows at runtime.
   Requires the OS toggle *Settings → Privacy → Microphone → "Let desktop apps
   access your microphone"* enabled. No manifest/entitlement needed.
+
+## Settings button in Messages web UI
+
+The settings page is reachable from the tray menu. Future enhancement: inject a
+small settings button into the Messages web UI via the existing initialization
+script so users can open settings without right-clicking the tray icon. Use a
+floating gear in the top-right corner to avoid depending on Google's DOM
+structure, or attach to a stable app header if one can be identified.

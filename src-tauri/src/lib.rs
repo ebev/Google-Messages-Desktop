@@ -5,19 +5,35 @@ use tauri::{
     Manager, WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_autostart::ManagerExt;
-
 // Canonical web entry point. When already paired this lands straight on the
 // (cached) conversation list; when not paired it redirects to the QR pairing
 // page on its own. Loading the pairing sub-route directly added an extra hop.
-const MESSAGES_URL: &str = "https://messages.google.com/web/";
+// Default start URL if the user has not customized it.
+const DEFAULT_START_URL: &str = "https://messages.google.com/web/";
 
 // User-facing settings, persisted to settings.json in the app config dir.
 // (Launch-at-login is tracked by the autostart plugin's own OS state, so it is
 // not duplicated here.)
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 struct Settings {
     /// When true, the app launches with the window hidden (tray only).
     start_in_tray: bool,
+    /// URL the main window loads on launch. Defaults to Google Messages.
+    start_url: Option<String>,
+    /// When true, the app shows native web notifications (the web app's own).
+    show_notifications: bool,
+    /// UI theme override: "system", "light", or "dark".
+    theme: Option<String>,
+    /// Remembered window geometry for the main webview.
+    main_window_size: Option<WindowSize>,
+    /// Mirrored copy of the autostart plugin state so the settings page can show it.
+    launch_at_login: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct WindowSize {
+    width: f64,
+    height: f64,
 }
 
 fn settings_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
@@ -43,6 +59,45 @@ fn save_settings(app: &tauri::AppHandle, settings: &Settings) {
             let _ = std::fs::write(path, json);
         }
     }
+}
+
+// Tauri commands exposed to the settings page.
+#[tauri::command]
+fn get_settings(app: tauri::AppHandle) -> Settings {
+    load_settings(&app)
+}
+
+#[tauri::command]
+fn set_settings(app: tauri::AppHandle, settings: Settings) {
+    // Keep the OS autostart entry in sync with the persisted launch-at-login flag.
+    let mgr = app.autolaunch();
+    let enabled = mgr.is_enabled().unwrap_or(false);
+    if settings.launch_at_login && !enabled {
+        let _ = mgr.enable();
+    } else if !settings.launch_at_login && enabled {
+        let _ = mgr.disable();
+    }
+    save_settings(&app, &settings);
+}
+
+// Opens the local settings window, or focuses it if already open.
+fn show_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    } else {
+        let _window = WebviewWindowBuilder::new(
+            app,
+            "settings",
+            WebviewUrl::App("settings.html".into()),
+        )
+        .title("Settings")
+        .inner_size(480.0, 540.0)
+        .min_inner_size(360.0, 420.0)
+        .center()
+        .build()?;
+    }
+    Ok(())
 }
 
 // On macOS & Linux the embedded WebKit view's default user-agent omits the
@@ -74,12 +129,19 @@ pub fn run() {
             None,
         ))
         .setup(|app| {
-            let settings = load_settings(app.handle());
+            let mut settings = load_settings(app.handle());
+            // Keep the persisted launch-at-login flag in sync with the OS/plugin.
+            settings.launch_at_login = app.autolaunch().is_enabled().unwrap_or(false);
+            save_settings(app.handle(), &settings);
 
             // Build the main window pointing at Google Messages. If the user
             // chose "Start in Tray", build it hidden.
+            let start_url = settings
+                .start_url
+                .as_deref()
+                .unwrap_or(DEFAULT_START_URL);
             let mut builder =
-                WebviewWindowBuilder::new(app, "main", WebviewUrl::External(MESSAGES_URL.parse()?))
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::External(start_url.parse()?))
                     .title("Google Messages")
                     .inner_size(1100.0, 780.0)
                     .min_inner_size(400.0, 500.0)
@@ -111,7 +173,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![set_tray_badge, open_external])
+        .invoke_handler(tauri::generate_handler![set_tray_badge, open_external, get_settings, set_settings])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -154,6 +216,7 @@ fn grant_media_permissions(window: &tauri::WebviewWindow) {
 
 fn build_tray(app: &tauri::App, settings: &Settings) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+    let settings_item = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
 
     // Settings as checkable items. Initial check state reflects current state:
@@ -180,6 +243,7 @@ fn build_tray(app: &tauri::App, settings: &Settings) -> tauri::Result<()> {
         app,
         &[
             &show,
+            &settings_item,
             &PredefinedMenuItem::separator(app)?,
             &launch_at_login,
             &start_in_tray,
@@ -220,16 +284,19 @@ fn build_tray(app: &tauri::App, settings: &Settings) -> tauri::Result<()> {
                     let _ = w.set_focus();
                 }
             }
+            "settings" => {
+                let _ = show_settings_window(&app);
+            }
             "quit" => app.exit(0),
             "autostart" => {
                 // The check item has already toggled its own visual state;
-                // mirror it to the OS autostart entry.
+                // mirror it to the OS autostart entry and persist the choice.
                 let mgr = app.autolaunch();
-                if mgr.is_enabled().unwrap_or(false) {
-                    let _ = mgr.disable();
-                } else {
-                    let _ = mgr.enable();
-                }
+                let desired = !mgr.is_enabled().unwrap_or(false);
+                let _ = if desired { mgr.enable() } else { mgr.disable() };
+                let mut s = load_settings(&app);
+                s.launch_at_login = desired;
+                save_settings(&app, &s);
             }
             "start_in_tray" => {
                 let mut s = load_settings(app);
