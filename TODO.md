@@ -1,5 +1,8 @@
 # TODO
 
+Remaining items are platform work targeted at 1.1+ (Windows/Linux). The
+settings window and in-app settings button shipped in 1.0.
+
 ## Linux: call audio/video (mic + camera) support
 
 Calls won't work on Linux out of the box. WebKitGTK gates `getUserMedia` behind
@@ -22,24 +25,6 @@ macOS/Windows builds):
 **Caveat:** must be compiled and verified on an actual Linux box — cannot be
 tested from macOS.
 
-## Proper settings window
-
-Current settings ("Launch at Login", "Start in Tray") live as checkable items in
-the tray menu — functional but minimal. Replace/supplement with a real settings
-window:
-
-- A dedicated webview window (its own label, e.g. `settings`) loading a local
-  HTML/JS page from `frontend/` (not the external Messages URL).
-- Surface the existing settings plus room to grow (e.g. start URL, window size
-  memory, notification toggles, theme override).
-- Bridge to Rust via `#[tauri::command]`s for get/set; persist through the
-  existing `Settings` struct + `settings.json` (extend as needed).
-- Add a "Settings…" item to the tray menu to open/focus the window; remember to
-  scope close-to-tray to the `main` label only (the settings window should close
-  normally) — same pattern already used in `on_window_event`.
-- Give the `settings` window its own capability entry (or widen `windows` in
-  `capabilities/default.json`) so its commands are permitted.
-
 ## Windows: status
 
 - DONE: auto-grant of WebView2 microphone/camera `PermissionRequested`
@@ -49,11 +34,3 @@ window:
 - STILL TODO: confirm mic/camera actually work in a call on Windows at runtime.
   Requires the OS toggle *Settings → Privacy → Microphone → "Let desktop apps
   access your microphone"* enabled. No manifest/entitlement needed.
-
-## Settings button in Messages web UI
-
-The settings page is reachable from the tray menu. Future enhancement: inject a
-small settings button into the Messages web UI via the existing initialization
-script so users can open settings without right-clicking the tray icon. Use a
-floating gear in the top-right corner to avoid depending on Google's DOM
-structure, or attach to a stable app header if one can be identified.

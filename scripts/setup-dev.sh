@@ -45,6 +45,42 @@ install_linux_deps() {
   fi
 }
 
+# Best-effort cross toolchain for the *other* Linux architecture, so
+# scripts/build.sh can cross-compile x86_64 <-> aarch64. Only implemented for
+# apt-based distros (Debian/Ubuntu multiarch); other distros need manual setup
+# or should build each architecture natively.
+install_linux_cross_toolchain() {
+  if ! command -v apt-get >/dev/null 2>&1; then
+    warn "Cross-arch Linux builds (scripts/build.sh targeting a foreign arch) need a"
+    warn "matching cross C toolchain + target-arch WebKitGTK dev libs. Automated"
+    warn "setup is only implemented for apt-based distros here — on this system,"
+    warn "build each architecture natively instead (e.g. per-arch CI runners)."
+    return
+  fi
+  local host_arch foreign_arch foreign_triple rust_target
+  host_arch="$(dpkg --print-architecture 2>/dev/null || true)"
+  case "$host_arch" in
+    amd64) foreign_arch=arm64; foreign_triple=aarch64-linux-gnu; rust_target=aarch64-unknown-linux-gnu ;;
+    arm64) foreign_arch=amd64; foreign_triple=x86_64-linux-gnu; rust_target=x86_64-unknown-linux-gnu ;;
+    *) warn "Unrecognized dpkg architecture '$host_arch' — skipping cross toolchain setup"; return ;;
+  esac
+  info "Setting up cross toolchain for $foreign_arch (host is $host_arch)…"
+  sudo dpkg --add-architecture "$foreign_arch"
+  sudo apt-get update
+  if ! sudo apt-get install -y \
+      "gcc-${foreign_triple}" "g++-${foreign_triple}" \
+      "libwebkit2gtk-4.1-dev:${foreign_arch}" "libssl-dev:${foreign_arch}" \
+      "libayatana-appindicator3-dev:${foreign_arch}" "librsvg2-dev:${foreign_arch}" \
+      "libxdo-dev:${foreign_arch}"; then
+    warn "Cross packages for $foreign_arch failed to install."
+    warn "On Ubuntu, foreign-arch packages (arm64/armhf) are hosted on"
+    warn "ports.ubuntu.com, not the default mirror — you may need to add that"
+    warn "as an apt source for [arch=$foreign_arch] before this will work."
+    warn "Until then, scripts/build.sh $rust_target will fail;"
+    warn "build that architecture natively instead."
+  fi
+}
+
 # 1. Platform build dependencies
 case "$OS" in
   Darwin)
@@ -75,6 +111,27 @@ else
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
   source "$HOME/.cargo/env"
 fi
+
+# Rust cross-compilation targets for scripts/build.sh. macOS ships Apple
+# Silicon builds only; Linux ships both x86_64 and aarch64.
+add_rust_target() {
+  if rustup target list --installed | grep -qx "$1"; then
+    info "  rust target $1: already installed"
+  else
+    info "  rust target $1: installing…"
+    rustup target add "$1"
+  fi
+}
+case "$OS" in
+  Darwin)
+    add_rust_target aarch64-apple-darwin
+    ;;
+  Linux)
+    add_rust_target x86_64-unknown-linux-gnu
+    add_rust_target aarch64-unknown-linux-gnu
+    install_linux_cross_toolchain
+    ;;
+esac
 
 # 3. Node.js
 if command -v node >/dev/null 2>&1; then

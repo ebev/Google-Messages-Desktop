@@ -17,5 +17,20 @@ fn main() {
         );
     }
 
-    tauri_build::build()
+    // Declare the app's own commands in the ACL manifest. Without this, invoke
+    // calls from remote origins (the Messages page itself) are rejected with
+    // "not allowed. Plugin not found" even when the origin is granted in
+    // capabilities/default.json — commands must exist in the manifest before a
+    // capability can allow them. Generates the allow-* permissions referenced
+    // in the capability file.
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
+        tauri_build::AppManifest::new().commands(&[
+            "set_tray_badge",
+            "open_external",
+            "get_settings",
+            "set_settings",
+            "open_settings",
+        ]),
+    ))
+    .expect("failed to run tauri-build");
 }

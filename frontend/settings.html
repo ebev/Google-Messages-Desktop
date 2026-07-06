@@ -156,7 +156,7 @@
         <div class="setting-label">
           <div>
             <div class="setting-title">Start in tray</div>
-            <div class="setting-desc">Hide the main window on launch and start as a tray icon only.</div>
+            <div class="setting-desc">Hide the main window on launch and start as a tray icon only. Applies at next launch.</div>
           </div>
           <label class="switch">
             <input id="startInTray" type="checkbox" />
@@ -190,11 +190,11 @@
       <div class="setting">
         <label for="startUrl">Start URL</label>
         <input id="startUrl" type="text" placeholder="https://messages.google.com/web/" />
-        <div class="setting-desc">URL loaded when the app launches. Defaults to Google Messages.</div>
+        <div class="setting-desc">URL loaded when the app launches. Leave empty for Google Messages. Applies at next launch.</div>
       </div>
 
       <div class="row-actions">
-        <button id="cancelBtn">Cancel</button>
+        <button id="closeBtn">Close</button>
         <button id="saveBtn" class="primary">Save</button>
       </div>
       <div id="status" class="status"></div>
@@ -207,7 +207,7 @@
       const theme = document.getElementById('theme');
       const startUrl = document.getElementById('startUrl');
       const saveBtn = document.getElementById('saveBtn');
-      const cancelBtn = document.getElementById('cancelBtn');
+      const closeBtn = document.getElementById('closeBtn');
       const status = document.getElementById('status');
 
       let currentSettings = {};
@@ -215,6 +215,25 @@
       function showStatus(text) {
         status.textContent = text;
         setTimeout(() => { status.textContent = ''; }, 2500);
+      }
+
+      function invoke(cmd, args) {
+        if (window.__TAURI_INTERNALS__) {
+          return window.__TAURI_INTERNALS__.invoke(cmd, args);
+        }
+        return Promise.reject(new Error('Tauri API not available'));
+      }
+
+      // Empty is fine (falls back to Google Messages); otherwise require a
+      // well-formed http(s) URL, since it's what the main window loads on boot.
+      function validStartUrl(value) {
+        if (!value) return true;
+        try {
+          const u = new URL(value);
+          return u.protocol === 'https:' || u.protocol === 'http:';
+        } catch (e) {
+          return false;
+        }
       }
 
       function readForm() {
@@ -238,12 +257,8 @@
 
       async function load() {
         try {
-          if (window.__TAURI_INTERNALS__) {
-            const settings = await window.__TAURI_INTERNALS__.invoke('get_settings');
-            applyForm(settings);
-          } else {
-            showStatus('Tauri API not available');
-          }
+          const settings = await invoke('get_settings');
+          applyForm(settings);
         } catch (e) {
           console.error('Failed to load settings:', e);
           showStatus('Failed to load settings');
@@ -251,15 +266,15 @@
       }
 
       async function save() {
+        const settings = readForm();
+        if (!validStartUrl(settings.start_url)) {
+          showStatus('Start URL must be a full http(s) URL.');
+          return;
+        }
         try {
-          const settings = readForm();
-          if (window.__TAURI_INTERNALS__) {
-            await window.__TAURI_INTERNALS__.invoke('set_settings', { settings });
-            applyForm(settings);
-            showStatus('Saved.');
-          } else {
-            showStatus('Tauri API not available');
-          }
+          await invoke('set_settings', { settings });
+          applyForm(settings);
+          showStatus('Saved.');
         } catch (e) {
           console.error('Failed to save settings:', e);
           showStatus('Failed to save settings');
@@ -267,7 +282,11 @@
       }
 
       saveBtn.addEventListener('click', save);
-      cancelBtn.addEventListener('click', () => applyForm(currentSettings));
+      closeBtn.addEventListener('click', () => {
+        invoke('plugin:window|close', { label: 'settings' }).catch((e) => {
+          console.error('Failed to close window:', e);
+        });
+      });
 
       load();
     </script>

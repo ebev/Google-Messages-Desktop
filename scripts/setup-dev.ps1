@@ -43,30 +43,33 @@ function Install-Winget($id, $name, $override) {
 }
 
 # 1. Visual Studio C++ Build Tools — MSVC linker (link.exe) + Windows SDK that
-#    Rust's MSVC toolchain needs.
+#    Rust's MSVC toolchain needs. Both the x64 and ARM64 toolsets are
+#    installed so scripts\build.ps1 can cross-compile either way.
 #
 #    NOTE: it's not enough for the Build Tools *package* to exist — a machine can
-#    have the installer present without the C++ workload, which leaves link.exe
-#    missing. So we detect the actual VC toolset component with vswhere and only
-#    then add the workload (modifying an existing install if needed).
-function Test-VCTools {
+#    have the installer present without a given toolset, which leaves link.exe
+#    missing for that architecture. So we detect the actual VC toolset
+#    components with vswhere and only then add what's missing (modifying an
+#    existing install if needed).
+function Test-VCComponent($component) {
   $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
   if (-not (Test-Path $vswhere)) { return $false }
-  $path = & $vswhere -products '*' -latest `
-    -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-    -property installationPath 2>$null
+  $path = & $vswhere -products '*' -latest -requires $component -property installationPath 2>$null
   return [bool]$path
 }
 
-if (Test-VCTools) {
-  Info "Visual Studio C++ Build Tools (VC toolset) already installed"
+$vcX64 = Test-VCComponent 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
+$vcArm64 = Test-VCComponent 'Microsoft.VisualStudio.Component.VC.Tools.ARM64'
+
+if ($vcX64 -and $vcArm64) {
+  Info "Visual Studio C++ Build Tools (x64 + ARM64 toolsets) already installed"
 } else {
-  Info "Installing Visual Studio C++ Build Tools (Desktop development with C++)…"
+  Info "Installing Visual Studio C++ Build Tools (Desktop development with C++, x64 + ARM64)…"
   # --force so winget runs the installer even if the base package is already
-  # present; --add modifies that install to include the C++ workload.
+  # present; --add modifies that install to include both toolsets.
   winget install -e --id Microsoft.VisualStudio.2022.BuildTools --force `
     --accept-source-agreements --accept-package-agreements `
-    --override '--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
+    --override '--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --includeRecommended'
 }
 
 # 2. WebView2 runtime (usually present on Windows 11; ensure it on Windows 10).
@@ -83,6 +86,11 @@ $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';
 # Make sure Rust uses the MSVC toolchain (matches the Build Tools above).
 if (Get-Command rustup -ErrorAction SilentlyContinue) {
   rustup default stable-msvc | Out-Null
+
+  # Cross-compilation targets for scripts\build.ps1 — this app ships both
+  # x64 and ARM64 Windows bundles.
+  rustup target add x86_64-pc-windows-msvc | Out-Null
+  rustup target add aarch64-pc-windows-msvc | Out-Null
 }
 
 # 4. JS dependencies
@@ -114,29 +122,20 @@ Check-Tool 'cargo' 'cargo'
 Check-Tool 'node'  'node '
 Check-Tool 'npm'   'npm  '
 
-# The ARM64 and x64 MSVC linkers are separate components; make sure the one
-# matching the active Rust host triple is installed (this is what catches the
-# "linker `link.exe` not found" failure on ARM64 machines that only have x64).
-if (Get-Command rustc -ErrorAction SilentlyContinue) {
-  $hostTriple = ((& rustc -vV) | Where-Object { $_ -like 'host:*' }) -replace 'host:\s*', ''
-  if ($hostTriple -like 'aarch64*') {
-    $component = 'Microsoft.VisualStudio.Component.VC.Tools.ARM64'
-    $arch = 'ARM64'
+# The ARM64 and x64 MSVC linkers are separate components; scripts\build.ps1
+# can target either, so check both (this is what catches the "linker
+# `link.exe` not found" failure when only one architecture's toolset is
+# installed).
+foreach ($pair in @(
+    @{ Arch = 'x64'; Component = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' },
+    @{ Arch = 'ARM64'; Component = 'Microsoft.VisualStudio.Component.VC.Tools.ARM64' }
+  )) {
+  if (Test-VCComponent $pair.Component) {
+    Info "  MSVC linker ($($pair.Arch)) : present"
   } else {
-    $component = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
-    $arch = 'x64'
-  }
-  $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-  $have = $false
-  if (Test-Path $vswhere) {
-    $have = [bool](& $vswhere -products '*' -latest -requires $component -property installationPath 2>$null)
-  }
-  if ($have) {
-    Info "  MSVC linker ($arch, for $hostTriple) : present"
-  } else {
-    Warn "  MSVC $arch C++ toolset is MISSING ($component)."
-    Warn "  Rust will fail with: linker 'link.exe' not found."
-    Warn "  Install it by re-running the Build Tools installer with:  --add $component"
+    Warn "  MSVC $($pair.Arch) C++ toolset is MISSING ($($pair.Component))."
+    Warn "  scripts\build.ps1 -Target $($pair.Arch.ToLower()) will fail with: linker 'link.exe' not found."
+    Warn "  Install it by re-running the Build Tools installer with:  --add $($pair.Component)"
     $script:ok = $false
   }
 }

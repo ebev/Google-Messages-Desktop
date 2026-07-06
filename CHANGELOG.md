@@ -5,6 +5,60 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-07-06
+
+### Added
+- Per-architecture build scripts: `scripts/build.sh` (macOS Apple Silicon;
+  Linux x86_64/aarch64, cross-compiling as needed) and `scripts/build.ps1`
+  (Windows x64/ARM64, cross-compiling via the MSVC toolchain). Each targets
+  the architectures relevant to its OS — macOS ships Apple Silicon only,
+  Windows and Linux ship both x86_64 and aarch64.
+- `scripts/setup-dev.sh`/`.ps1` now also install what those build scripts
+  need: the extra Rust targets, both MSVC VC++ Tools toolsets on Windows, and
+  (best-effort, apt-based distros only) the Linux cross C toolchain +
+  target-arch WebKitGTK dev libraries.
+
+### Fixed
+- IPC from the Messages page itself had **never worked**: every `invoke` from
+  the main window was rejected with `"not allowed. Plugin not found"`, so the
+  tray unread badge and the external-link handoff were silently dead (the root
+  cause the earlier click/link diagnostics were chasing). Two things were
+  required:
+  - the app's own commands must be declared in the ACL manifest
+    (`tauri_build::AppManifest::commands` in `build.rs`) and granted as
+    `allow-*` permissions in `capabilities/default.json`;
+  - `https://messages.google.com/*` must be listed as a `remote` origin there
+    — Tauri denies IPC from remote domains by default (note: an origin without
+    the `/*` path wildcard does not match).
+- Debug builds now log command invocations (`[ipc] …`) to stderr so a broken
+  IPC path is visible in `npm run dev` instead of failing silently.
+
+### Added
+- Dedicated **Settings window** (local `frontend/settings.html`, opened from the
+  tray menu or the new floating gear button injected into the Messages web UI):
+  - **Launch at Login** and **Start in Tray** (moved out of the tray menu).
+  - **Show notifications** toggle — the injected `Notification` wrapper now
+    honors it (an inert stand-in is returned when off), applied live on save.
+  - **Theme** override (System / Light / Dark) — applied live to all windows
+    and on startup.
+  - **Start URL** override with http(s) validation.
+- Main window **size memory**: the window's size is saved when it closes to
+  tray or the app quits, and restored on next launch.
+
+### Changed
+- Tray menu simplified to **Show / Settings… / Quit**; the checkable
+  "Launch at Login" / "Start in Tray" items were replaced by the settings
+  window so their check state can't drift from `settings.json`.
+- `show_notifications` now defaults to **on** for fresh installs and for
+  `settings.json` files written before the field existed.
+
+### Removed
+- Temporary click/link diagnostics from the injected script and
+  `open_external` (added while tracking down the Account-button behavior).
+- Invalid `commands` block in `capabilities/default.json` (not part of the
+  capability schema; app commands aren't ACL-gated and it was silently
+  ignored).
+
 ## [0.4.1] - 2026-05-31
 
 ### Added

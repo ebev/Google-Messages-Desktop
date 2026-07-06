@@ -3,18 +3,21 @@
   "identifier": "default",
   "description": "Default capabilities for Google Messages",
   "windows": ["main", "settings"],
+  "remote": {
+    "urls": ["https://messages.google.com/*"]
+  },
   "permissions": [
     "core:default",
     "core:window:default",
     "core:window:allow-show",
     "core:window:allow-set-focus",
+    "core:window:allow-close",
     "notification:default",
-    "opener:default"
-  ],
-  "commands": {
-    "allow": [
-      { "command": "get_settings" },
-      { "command": "set_settings" }
-    ]
-  }
+    "opener:default",
+    "allow-set-tray-badge",
+    "allow-open-external",
+    "allow-get-settings",
+    "allow-set-settings",
+    "allow-open-settings"
+  ]
 }
