@@ -173,10 +173,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // If a second instance is launched, focus the existing window
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -215,20 +212,27 @@ pub fn run() {
                     .theme(parse_theme(settings.theme.as_deref()))
                     .center()
                     .visible(!settings.start_in_tray)
-                    .initialization_script(&init_script);
+                    .initialization_script_for_all_frames(&init_script);
             if let Some(ua) = USER_AGENT {
                 builder = builder.user_agent(ua);
             }
             #[allow(unused_variables)]
             let window = builder.build()?;
 
-            // On Windows, auto-grant mic/camera so calls don't prompt every
-            // session. macOS is handled by wry (auto-grant) + Info.plist; Linux
-            // is tracked separately in TODO.md.
-            #[cfg(windows)]
+            // On Windows & Linux, auto-grant mic/camera so calls don't prompt
+            // every session (or fail outright on Linux where media-stream is
+            // disabled by default). macOS is handled by wry (auto-grant) +
+            // Info.plist.
+            #[cfg(any(windows, target_os = "linux"))]
             grant_media_permissions(&window);
 
             build_tray(app)?;
+            #[cfg(target_os = "macos")]
+            if settings.start_in_tray {
+                let _ = app
+                    .handle()
+                    .set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
             Ok(())
         })
         // Close the main window to tray instead of quitting; other windows
@@ -237,7 +241,7 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     save_main_window_size(window);
-                    let _ = window.hide();
+                    hide_main_window(window.app_handle());
                     api.prevent_close();
                 }
             }
@@ -287,6 +291,48 @@ fn grant_media_permissions(window: &tauri::WebviewWindow) {
             );
         }
     });
+}
+
+// Enable WebKitGTK media-stream/WebRTC support (off by default) and auto-allow
+// user-media permission requests so voice/video calls work on Linux.
+#[cfg(target_os = "linux")]
+fn grant_media_permissions(window: &tauri::WebviewWindow) {
+    use webkit2gtk::glib::Cast;
+    use webkit2gtk::{PermissionRequestExt, SettingsExt, UserMediaPermissionRequest, WebViewExt};
+
+    let _ = window.with_webview(|webview| {
+        let wv = webview.inner();
+        if let Some(settings) = WebViewExt::settings(&wv) {
+            settings.set_enable_media_stream(true);
+            settings.set_enable_webrtc(true);
+        }
+        wv.connect_permission_request(|_, request| {
+            if request.is::<UserMediaPermissionRequest>() {
+                request.allow();
+                return true;
+            }
+            false
+        });
+    });
+}
+
+// Shows and focuses the main window, restoring the Dock icon on macOS.
+fn show_main_window(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+// Hides the main window to the tray, removing the Dock icon on macOS.
+fn hide_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 }
 
 // Persists the main window's current logical size so it can be restored on
@@ -349,10 +395,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 
     tray.on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.set_focus();
-                }
+                show_main_window(app);
             }
             "settings" => {
                 let _ = show_settings_window(app);
@@ -378,10 +421,9 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
                 let app = tray.app_handle();
                 if let Some(window) = app.get_webview_window("main") {
                     if window.is_visible().unwrap_or(false) {
-                        let _ = window.hide();
+                        hide_main_window(app);
                     } else {
-                        let _ = window.show();
-                        let _ = window.set_focus();
+                        show_main_window(app);
                     }
                 }
             }
@@ -426,7 +468,9 @@ fn set_tray_badge(app: tauri::AppHandle, count: u32) {
     }
 }
 
-// Injected into the webview on load:
+// Injected into the webview on load (including subframes):
+//  - Disables WebAuthn/passkeys so Google Sign-In skips broken embedded-webview
+//    passkey prompts and goes straight to "Approve on another device" / password
 //  - Observes the page title for unread count changes and calls set_tray_badge
 //  - Adds a floating gear button that opens the app settings window
 //  - Routes target="_blank" links (in-window for Messages, OS browser otherwise)
@@ -435,6 +479,83 @@ fn set_tray_badge(app: tauri::AppHandle, count: u32) {
 // setting before injection.
 const INIT_SCRIPT: &str = r#"
 (function () {
+    // --- Disable WebAuthn / Passkeys ---
+    // Embedded webviews (WKWebView on macOS, WebKitGTK on Linux, WebView2 on
+    // Windows) cannot satisfy third-party Relying Party / Associated Domain
+    // attestation for google.com, so passkey challenges fail after the user
+    // enters their email. By reporting that platform authenticators and
+    // PublicKeyCredential are unavailable in every frame, accounts.google.com
+    // skips the broken passkey step and goes directly to "Approve on another
+    // device" (Google Prompt) or password sign-in.
+    try {
+        if (window.PublicKeyCredential) {
+            if (typeof window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function') {
+                window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = function () {
+                    return Promise.resolve(false);
+                };
+            }
+            if (typeof window.PublicKeyCredential.isConditionalMediationAvailable === 'function') {
+                window.PublicKeyCredential.isConditionalMediationAvailable = function () {
+                    return Promise.resolve(false);
+                };
+            }
+            if (typeof window.PublicKeyCredential.getClientCapabilities === 'function') {
+                window.PublicKeyCredential.getClientCapabilities = function () {
+                    return Promise.resolve({
+                        conditionalCreate: false,
+                        conditionalGet: false,
+                        hybridTransport: false,
+                        passkeyPlatformAuthenticator: false,
+                        relatedOrigins: false,
+                        signalAllAcceptedCredentials: false,
+                        signalCurrentUserDetails: false,
+                        signalUnknownCredential: false,
+                        userVerifyingPlatformAuthenticator: false,
+                    });
+                };
+            }
+        }
+        try {
+            delete window.PublicKeyCredential;
+        } catch (_) {
+            Object.defineProperty(window, 'PublicKeyCredential', {
+                value: undefined,
+                configurable: true,
+                writable: true,
+            });
+        }
+        if (navigator.credentials) {
+            const origGet = navigator.credentials.get;
+            if (origGet) {
+                navigator.credentials.get = function (options) {
+                    if (options && options.publicKey) {
+                        return Promise.reject(
+                            new DOMException('Passkeys are not supported in this embedded webview.', 'NotSupportedError')
+                        );
+                    }
+                    return origGet.apply(navigator.credentials, arguments);
+                };
+            }
+            const origCreate = navigator.credentials.create;
+            if (origCreate) {
+                navigator.credentials.create = function (options) {
+                    if (options && options.publicKey) {
+                        return Promise.reject(
+                            new DOMException('Passkeys are not supported in this embedded webview.', 'NotSupportedError')
+                        );
+                    }
+                    return origCreate.apply(navigator.credentials, arguments);
+                };
+            }
+        }
+    } catch (_) {}
+
+    // The remaining hooks (unread badge, settings gear, link routing,
+    // Notification wrapper) only belong in the top-level frame.
+    if (window !== window.top) {
+        return;
+    }
+
     function invoke(cmd, args) {
         if (window.__TAURI_INTERNALS__) {
             return window.__TAURI_INTERNALS__.invoke(cmd, args);

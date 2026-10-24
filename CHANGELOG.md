@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-10-24
+
+### Added
+- **Linux call audio/video support:** added `webkit2gtk` (`cfg(target_os = "linux")`)
+  and implemented `grant_media_permissions` to enable WebKitGTK's
+  `enable-media-stream` and `enable-webrtc` settings and auto-allow
+  `UserMediaPermissionRequest` prompts.
+- **macOS Dock icon hiding when in tray:** switches `tauri::ActivationPolicy` to
+  `Accessory` whenever the main window is hidden (closing to tray, left-clicking
+  the tray icon to hide, or launching with **Start in Tray** enabled) and back
+  to `Regular` when the window is shown again.
+
+### Fixed
+- **Google Sign-In passkey failure in embedded webview:** disabled WebAuthn /
+  `PublicKeyCredential` capability advertisement across all frames so
+  `accounts.google.com` skips the unsupported embedded-webview passkey prompt
+  and goes directly to "Approve on another device" (Google Prompt) or password
+  sign-in.
+
 ## [1.0.0] - 2026-07-06
 
 ### Added

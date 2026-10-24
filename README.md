@@ -11,8 +11,8 @@ bundling Chromium, so the app stays small.
 - Settings window (tray menu → **Settings…**, or the floating gear in the app):
   **Launch at Login**, **Start in Tray**, notifications toggle, theme override
   (System / Light / Dark), and a custom start URL
-- Closes to tray instead of quitting; single-instance enforced; window size
-  remembered across launches
+- Closes to tray instead of quitting (hiding the macOS Dock icon while in the
+  tray); single-instance enforced; window size remembered across launches
 - System notifications, even when the window is hidden
 - Follows the system light/dark theme (or force light/dark in Settings)
 - Unread-count surfaced via the tray tooltip
@@ -20,7 +20,8 @@ bundling Chromium, so the app stays small.
   `target="_blank"` links), with a Safari user-agent so they aren't rejected as
   an unsupported browser
 - Microphone/camera access for calls (macOS via embedded `Info.plist`; Windows
-  via WebView2 permission auto-grant)
+  via WebView2 permission auto-grant; Linux via WebKitGTK media-stream/WebRTC
+  and permission auto-grant)
 
 ## Prerequisites
 
@@ -92,4 +93,4 @@ Bundles land in `src-tauri/target/<target-triple>/release/bundle/`.
 
 - **macOS / Linux** present a Safari user-agent; **Windows** keeps WebView2's
   native Edge user-agent.
-- **Linux** call audio needs additional work — see [TODO.md](TODO.md).
+- **Linux** calls require a working PipeWire/PulseAudio stack at runtime.
