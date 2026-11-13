@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-prompt-takeover-session"
+description = "Enables the prompt_takeover_session command without any pre-configured scope."
+commands.allow = ["prompt_takeover_session"]
+
+[[permission]]
+identifier = "deny-prompt-takeover-session"
+description = "Denies the prompt_takeover_session command without any pre-configured scope."
+commands.deny = ["prompt_takeover_session"]

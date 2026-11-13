@@ -5,6 +5,56 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-11-12
+
+### Added
+- **Background listener & anti-throttling keep-alive:**
+  - Disables WebView background throttling (`BackgroundThrottlingPolicy::Disabled`)
+    and passes Chromium background timer/renderer flags on Windows WebView2 so
+    connections and notifications stay alive when hidden in the tray.
+  - Holds a macOS `NSProcessInfo` `UserInitiatedAllowingIdleSystemSleep`
+    activity assertion while background keep-alive is active to prevent App Nap
+    suspension without blocking idle system sleep.
+  - Runs a 30-second Rust heartbeat & connection watchdog
+    (`start_background_listener`) that detects OS sleep/wake jumps, monitors
+    connection banners, and silently reloads stalled/unresponsive pages (with a
+    120-second cooldown, skipping reloads while composing or on a call).
+  - Adds a **Keep connected in background** toggle (`background_keep_alive`,
+    enabled by default) in Settings.
+- **Native notification bridge & unread fallback:**
+  - Replaces `tauri-plugin-notification` with a direct OS notification bridge
+    (`send_native_notification`): `NSUserNotificationCenter` + persistent
+    delegate on macOS, `notify-rust` action listener on Linux, and WebView2
+    native `Notification` with `COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS`
+    auto-granted on Windows.
+  - Exposes a full `EventTarget`-compliant `window.Notification` wrapper with
+    reliable click-to-restore-and-focus behavior.
+  - Dispatches a fallback native notification if the unread count increases
+    while the app is unfocused/hidden and no web `Notification` fires within
+    1.5 seconds.
+- **"Google Messages is open on another computer" protection:**
+  - Detects when another computer takes over the active Google Messages session
+    (`"Use here"` prompt), immediately pauses background auto-refresh, and
+    releases the macOS App Nap assertion.
+  - Pops a native notification alerting the user; clicking it restores the main
+    window and opens a confirmation modal (**Move session here** vs. **No, let
+    app sleep**). Ignoring the notification or choosing **No** lets the OS sleep
+    the app normally.
+- **Redesigned Settings UI & larger SVG gear button:**
+  - Replaced the flat Settings page with a native-style grouped card layout
+    featuring category icon badges, a segmented **System / Light / Dark** theme
+    control, auto-save on toggle/theme change, and a sticky footer bar.
+  - Replaced the tiny Unicode `⚙` gear button with a crisp 22×22 Material SVG
+    cog inside a 34×34 circular button.
+
+### Fixed
+- **Windows build & Settings window deadlock:** removed the unsupported
+  `browser_accelerator_keys` builder call (suppressing browser-only shortcuts in
+  `INIT_SCRIPT` instead), fixed `set_overlay_icon(Some(badge))` ownership,
+  matched `WINDOWS_BROWSER_ARGS` across windows sharing the WebView2
+  `userDataFolder`, and spawned `show_settings_window` off the UI thread so
+  opening Settings never deadlocks WebView2.
+
 ## [1.2.0] - 2026-10-26
 
 ### Added

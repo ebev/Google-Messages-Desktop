@@ -15,7 +15,6 @@
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "core:window:allow-close",
-    "notification:default",
     "opener:default",
     "allow-set-tray-badge",
     "allow-open-external",
@@ -23,6 +22,10 @@
     "allow-set-settings",
     "allow-open-settings",
     "allow-focus-main-window",
-    "allow-adjust-zoom"
+    "allow-adjust-zoom",
+    "allow-send-native-notification",
+    "allow-report-heartbeat",
+    "allow-set-session-yielded",
+    "allow-prompt-takeover-session"
   ]
 }

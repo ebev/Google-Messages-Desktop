@@ -9,14 +9,21 @@ bundling Chromium, so the app stays small.
 - Native window wrapping `messages.google.com`
 - System tray icon — left-click toggles the window, right-click for the menu
 - Settings window (tray menu → **Settings…**, `Ctrl+,` / `Cmd+,`, or the
-  floating gear in the app): **Launch at Login**, **Start in Tray**,
-  notifications toggle, theme override (System / Light / Dark), and a custom
-  start URL
+  floating gear in the app): **Launch at Login**, **Start in system tray**,
+  **Show desktop notifications**, **Keep connected in background**, theme
+  override (System / Light / Dark), and a custom start URL
 - Closes to tray instead of quitting (hiding the macOS Dock icon and
   Windows/Linux taskbar presence while in the tray); single-instance enforced;
   window size, position, and maximized state remembered across launches
-- System notifications, even when the window is hidden — clicking a
-  notification unminimizes, unhides, and focuses the main window
+- Background listener & connection watchdog that prevents OS/WebView
+  throttling while in the tray and silently recovers stalled connections after
+  sleep or network drops
+- Protection for **"Google Messages is open on another computer"**: pauses
+  background refresh, pops a native notification, and lets you choose whether
+  to move the session here or let the OS sleep the app
+- Native OS notifications across macOS, Windows, and Linux (including an
+  unread-increase fallback when hidden) — clicking a notification unminimizes,
+  unhides, and focuses the main window
 - Follows the system light/dark theme (or force light/dark in Settings) with a
   theme-matched cold-start background to prevent white flashes
 - Unread count surfaced via a native Windows taskbar overlay badge, macOS

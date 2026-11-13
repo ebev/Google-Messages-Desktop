@@ -1,5 +1,25 @@
 # TODO
 
+## v1.3 — Background Listener, Notification Reliability & Session Takeover Protection
+
+### 1. Background Listener & Anti-Throttling Keep-Alive — DONE
+- [x] **Disable WebView Background Throttling:** Configure `BackgroundThrottlingPolicy::Disabled` on the main window and pass Chromium `--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows` flags on Windows WebView2 so background timers and WebSockets stay active when hidden in the tray.
+- [x] **macOS App Nap Control:** Hold an `NSProcessInfo` `UserInitiatedAllowingIdleSystemSleep` activity assertion while background keep-alive is active, and release it automatically if the user disables keep-alive or yields the session to another computer.
+- [x] **Smart Rust Heartbeat & Watchdog (`start_background_listener`):** Run a 30-second native background heartbeat thread that detects OS sleep/wake jumps, pings the webview (`window.__gmHeartbeat`), inspects connection banners (`"Trying to reach your phone"`, `"No internet connection"`), and performs a silent auto-reload (with a 120s cooldown) only when the page is disconnected or frozen.
+- [x] **"Keep connected in background" Setting:** Add `background_keep_alive` (default `true`) to `settings.json` and the Settings UI (`#backgroundKeepAlive`).
+
+### 2. Native Notification Reliability & Unread Fallback — DONE
+- [x] **Replace `tauri-plugin-notification` with Native Bridge:** Remove `tauri-plugin-notification` (whose `init-iife.js` overwrote `window.Notification` with a non-EventTarget stub and dropped desktop click handlers) and implement `send_native_notification` using `NSUserNotificationCenter` + a persistent `GmNotificationDelegate` on macOS, `notify-rust` action handlers on Linux, and WebView2's native `Notification` with `COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS` auto-granted on Windows.
+- [x] **Full `EventTarget` `GMNotification` Wrapper:** Expose a spec-compliant `window.Notification` wrapper supporting `.onclick`, `.addEventListener('click', ...)`, and `.close()`, plus automatic main-window restore/focus on click.
+- [x] **Unread-Count Increase Fallback Notification:** If the unread badge count increases while the window is unfocused/hidden in the tray and Google Messages did not fire a Web `Notification` within 1.5s, synthesize a fallback native notification so background messages are never missed.
+
+### 3. "Google Messages is open on another computer" Protection — DONE
+- [x] **Other-Computer Session Detection:** Detect the `"Google Messages is open on another computer"` state (`"Use here"` prompt) in `INIT_SCRIPT`, immediately pause background auto-refresh, and notify the Rust backend (`report_heartbeat` with `other_session: true`).
+- [x] **Native Takeover Alert & Modal Prompt:** Fire a native OS notification when another computer takes over the session; clicking the notification (or clicking `"Use here"` in the macOS notification banner) restores the main window and opens an in-app confirmation modal (`"Move session here"` vs. `"No, let app sleep"`).
+- [x] **Graceful OS Sleep When Ignored or Declined:** If the user ignores the notification or clicks `"No, let app sleep"`, mark the session yielded (`set_session_yielded(true)`), keep background refresh paused, and release the OS App Nap / anti-sleep assertion so the OS can sleep the app normally until the user returns and resumes.
+
+---
+
 ## v1.2 — Native Desktop Polish (Cross-Platform: Windows / macOS / Linux)
 
 ### Batch 1: Unread Badges on Taskbar, Dock & System Tray — DONE

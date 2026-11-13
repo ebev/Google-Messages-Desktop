@@ -1,220 +1,659 @@
 <!DOCTYPE html>
-<html>
+<html lang="en" data-theme="system">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Settings</title>
     <style>
       :root {
-        --bg: #ffffff;
-        --fg: #1f1f1f;
-        --muted: #5f6368;
-        --border: #dadce0;
-        --accent: #1a73e8;
-        --hover: #e8f0fe;
+        color-scheme: light dark;
+        --canvas: #f2f3f7;
+        --card-bg: #ffffff;
+        --card-border: rgba(0, 0, 0, 0.08);
+        --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+        --row-divider: rgba(0, 0, 0, 0.06);
+        --row-hover: rgba(0, 0, 0, 0.02);
+        --fg: #1c1c1e;
+        --muted: #6c6c70;
+        --section-label: #6e6e73;
+        --accent: #0b57d0;
+        --accent-fg: #ffffff;
+        --switch-off: #d1d1d6;
+        --seg-bg: #e5e5ea;
+        --seg-active-bg: #ffffff;
+        --seg-active-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
+        --input-bg: #f5f6f8;
+        --input-border: rgba(0, 0, 0, 0.14);
+        --btn-bg: #ffffff;
+        --btn-border: rgba(0, 0, 0, 0.15);
+        --btn-hover: #f2f2f7;
+        --footer-bg: rgba(242, 243, 247, 0.88);
         --danger: #d93025;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        --success: #188038;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", Roboto, Ubuntu, sans-serif;
       }
+
       @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #1e1e1e;
-          --fg: #e8eaed;
+        :root:not([data-theme="light"]) {
+          --canvas: #131314;
+          --card-bg: #1e1f22;
+          --card-border: rgba(255, 255, 255, 0.08);
+          --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+          --row-divider: rgba(255, 255, 255, 0.06);
+          --row-hover: rgba(255, 255, 255, 0.025);
+          --fg: #e3e3e3;
           --muted: #9aa0a6;
-          --border: #3c4043;
+          --section-label: #8e918f;
           --accent: #8ab4f8;
-          --hover: #3c4043;
+          --accent-fg: #082046;
+          --switch-off: #44474e;
+          --seg-bg: #131314;
+          --seg-active-bg: #303238;
+          --seg-active-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+          --input-bg: #141517;
+          --input-border: rgba(255, 255, 255, 0.14);
+          --btn-bg: #282a2e;
+          --btn-border: rgba(255, 255, 255, 0.12);
+          --btn-hover: #33363b;
+          --footer-bg: rgba(19, 19, 20, 0.88);
           --danger: #f28b82;
+          --success: #81c995;
         }
       }
-      html, body { height: 100%; margin: 0; }
+
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+        --canvas: #131314;
+        --card-bg: #1e1f22;
+        --card-border: rgba(255, 255, 255, 0.08);
+        --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+        --row-divider: rgba(255, 255, 255, 0.06);
+        --row-hover: rgba(255, 255, 255, 0.025);
+        --fg: #e3e3e3;
+        --muted: #9aa0a6;
+        --section-label: #8e918f;
+        --accent: #8ab4f8;
+        --accent-fg: #082046;
+        --switch-off: #44474e;
+        --seg-bg: #131314;
+        --seg-active-bg: #303238;
+        --seg-active-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+        --input-bg: #141517;
+        --input-border: rgba(255, 255, 255, 0.14);
+        --btn-bg: #282a2e;
+        --btn-border: rgba(255, 255, 255, 0.12);
+        --btn-hover: #33363b;
+        --footer-bg: rgba(19, 19, 20, 0.88);
+        --danger: #f28b82;
+        --success: #81c995;
+      }
+
+      :root[data-theme="light"] {
+        color-scheme: light;
+      }
+
+      *, *::before, *::after {
+        box-sizing: border-box;
+      }
+
+      html, body {
+        height: 100%;
+        margin: 0;
+        overscroll-behavior: none;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-font-smoothing: antialiased;
+      }
+
       body {
-        background: var(--bg);
+        background: var(--canvas);
         color: var(--fg);
         display: flex;
         flex-direction: column;
         overflow: hidden;
+        font-size: 13px;
       }
-      header {
-        padding: 16px 20px;
-        border-bottom: 1px solid var(--border);
-        font-size: 18px;
-        font-weight: 600;
-      }
+
       main {
         flex: 1;
         overflow-y: auto;
-        padding: 12px 20px 24px;
+        padding: 16px 18px 18px;
       }
-      .setting {
-        padding: 14px 0;
-        border-bottom: 1px solid var(--border);
-      }
-      .setting:last-child { border-bottom: none; }
-      .setting-label {
+
+      /* App Banner Card */
+      .app-banner {
         display: flex;
-        justify-content: space-between;
         align-items: center;
-        gap: 16px;
+        gap: 13px;
+        padding: 12px 14px;
+        background: var(--card-bg);
+        border: 1px solid var(--card-border);
+        border-radius: 12px;
+        box-shadow: var(--card-shadow);
+        margin-bottom: 16px;
       }
-      .setting-title { font-weight: 500; }
-      .setting-desc {
-        font-size: 13px;
+
+      .app-icon {
+        width: 38px;
+        height: 38px;
+        border-radius: 10px;
+        background: linear-gradient(145deg, #1a73e8, #0b57d0);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #ffffff;
+        flex-shrink: 0;
+        box-shadow: 0 2px 6px rgba(11, 87, 208, 0.3);
+      }
+
+      .app-meta {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .app-name {
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      .app-sub {
+        font-size: 12px;
         color: var(--muted);
-        margin-top: 4px;
-        line-height: 1.4;
+        margin-top: 1px;
       }
+
+      .app-badge {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: var(--seg-bg);
+        color: var(--muted);
+      }
+
+      /* Grouped Section */
+      .section {
+        margin-bottom: 15px;
+      }
+
+      .section-title {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--section-label);
+        padding: 0 6px 6px;
+      }
+
+      .card {
+        background: var(--card-bg);
+        border: 1px solid var(--card-border);
+        border-radius: 11px;
+        box-shadow: var(--card-shadow);
+        overflow: hidden;
+      }
+
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 11px 14px;
+        border-bottom: 1px solid var(--row-divider);
+        transition: background-color 0.12s ease;
+      }
+
+      .row:last-child {
+        border-bottom: none;
+      }
+
+      .row.interactive:hover {
+        background: var(--row-hover);
+      }
+
+      .row-stacked {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+      }
+
+      .row-left {
+        display: flex;
+        align-items: flex-start;
+        gap: 11px;
+        min-width: 0;
+        flex: 1;
+      }
+
+      .row-icon {
+        width: 28px;
+        height: 28px;
+        border-radius: 7px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        margin-top: 1px;
+      }
+
+      .row-icon svg {
+        width: 16px;
+        height: 16px;
+      }
+
+      .icon-blue { background: rgba(26, 115, 232, 0.15); color: #4c8df6; }
+      .icon-purple { background: rgba(147, 52, 230, 0.15); color: #af5cf7; }
+      .icon-amber { background: rgba(249, 171, 0, 0.16); color: #f29900; }
+      .icon-green { background: rgba(30, 142, 62, 0.16); color: #34a853; }
+      .icon-teal { background: rgba(18, 181, 203, 0.16); color: #24c1e0; }
+      .icon-slate { background: rgba(128, 134, 139, 0.16); color: var(--muted); }
+
+      .row-text {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .setting-title {
+        font-size: 13.5px;
+        font-weight: 500;
+        line-height: 1.3;
+      }
+
+      .setting-desc {
+        font-size: 11.5px;
+        color: var(--muted);
+        margin-top: 2px;
+        line-height: 1.38;
+      }
+
+      /* Native Switch */
       label.switch {
         position: relative;
         display: inline-block;
         width: 40px;
         height: 22px;
         flex-shrink: 0;
+        cursor: pointer;
       }
-      label.switch input { opacity: 0; width: 0; height: 0; }
+
+      label.switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
       .slider {
         position: absolute;
-        cursor: pointer;
-        top: 0; left: 0; right: 0; bottom: 0;
-        background: var(--border);
-        border-radius: 22px;
-        transition: background .15s ease;
+        inset: 0;
+        background: var(--switch-off);
+        border-radius: 999px;
+        transition: background-color 0.16s ease;
       }
-      .slider:before {
+
+      .slider::before {
         position: absolute;
         content: "";
-        height: 16px;
-        width: 16px;
-        left: 3px;
-        bottom: 3px;
-        background: white;
+        height: 18px;
+        width: 18px;
+        left: 2px;
+        bottom: 2px;
+        background: #ffffff;
         border-radius: 50%;
-        transition: transform .15s ease;
+        box-shadow: 0 1px 2.5px rgba(0, 0, 0, 0.28);
+        transition: transform 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
       }
-      input:checked + .slider { background: var(--accent); }
-      input:checked + .slider:before { transform: translateX(18px); }
-      input[type="text"], select {
-        width: 100%;
-        box-sizing: border-box;
-        margin-top: 8px;
-        padding: 8px 10px;
-        background: var(--bg);
-        color: var(--fg);
-        border: 1px solid var(--border);
-        border-radius: 6px;
+
+      input:checked + .slider {
+        background: var(--accent);
+      }
+
+      input:checked + .slider::before {
+        transform: translateX(18px);
+      }
+
+      input:focus-visible + .slider {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+
+      /* Segmented Theme Control */
+      .segmented {
+        display: inline-flex;
+        background: var(--seg-bg);
+        padding: 3px;
+        border-radius: 8px;
+        gap: 2px;
+        flex-shrink: 0;
+      }
+
+      .seg-btn {
+        border: none;
+        background: transparent;
+        color: var(--muted);
         font: inherit;
-      }
-      input[type="text"]:focus, select:focus { outline: 2px solid var(--accent); }
-      .row-actions {
-        display: flex;
-        gap: 8px;
-        margin-top: 16px;
-        padding-top: 12px;
-        border-top: 1px solid var(--border);
-      }
-      button {
-        flex: 1;
-        padding: 8px 12px;
-        border: 1px solid var(--border);
+        font-size: 12px;
+        font-weight: 500;
+        padding: 4px 10px;
         border-radius: 6px;
-        background: var(--hover);
-        color: var(--fg);
-        font: inherit;
         cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        transition: color 0.12s ease, background-color 0.12s ease;
       }
-      button.primary {
+
+      .seg-btn svg {
+        width: 13px;
+        height: 13px;
+      }
+
+      .seg-btn:hover {
+        color: var(--fg);
+      }
+
+      .seg-btn.active {
+        background: var(--seg-active-bg);
+        color: var(--fg);
+        box-shadow: var(--seg-active-shadow);
+      }
+
+      /* Text Input & Reset */
+      .url-field-wrap {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding-left: 39px;
+      }
+
+      input[type="text"] {
+        flex: 1;
+        padding: 6px 10px;
+        background: var(--input-bg);
+        color: var(--fg);
+        border: 1px solid var(--input-border);
+        border-radius: 7px;
+        font: inherit;
+        font-size: 12.5px;
+        user-select: text;
+        -webkit-user-select: text;
+      }
+
+      input[type="text"]:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: -1px;
+        border-color: transparent;
+      }
+
+      .reset-btn {
+        padding: 6px 10px;
+        border-radius: 7px;
+        border: 1px solid var(--btn-border);
+        background: var(--btn-bg);
+        color: var(--muted);
+        font: inherit;
+        font-size: 11.5px;
+        font-weight: 500;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+
+      .reset-btn:hover {
+        background: var(--btn-hover);
+        color: var(--fg);
+      }
+
+      /* Native Sticky Footer */
+      footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 18px;
+        background: var(--footer-bg);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border-top: 1px solid var(--card-border);
+      }
+
+      .status {
+        font-size: 12px;
+        color: var(--muted);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 18px;
+      }
+
+      .status.ok {
+        color: var(--success);
+      }
+
+      .status.err {
+        color: var(--danger);
+      }
+
+      .footer-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .btn {
+        padding: 6px 14px;
+        border: 1px solid var(--btn-border);
+        border-radius: 7px;
+        background: var(--btn-bg);
+        color: var(--fg);
+        font: inherit;
+        font-size: 12.5px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: background-color 0.12s ease;
+      }
+
+      .btn:hover {
+        background: var(--btn-hover);
+      }
+
+      .btn.primary {
         background: var(--accent);
         border-color: var(--accent);
-        color: white;
+        color: var(--accent-fg);
+        font-weight: 600;
       }
-      button.danger { color: var(--danger); }
-      .status {
-        text-align: center;
-        font-size: 13px;
-        color: var(--muted);
-        min-height: 18px;
-        margin-top: 10px;
+
+      .btn.primary:hover {
+        filter: brightness(1.06);
       }
     </style>
   </head>
   <body>
-    <header>Settings</header>
     <main>
-      <div class="setting">
-        <div class="setting-label">
-          <div>
-            <div class="setting-title">Launch at login</div>
-            <div class="setting-desc">Start Google Messages automatically when you log in.</div>
+      <div class="app-banner">
+        <div class="app-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+            <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-3 9H7V9h10v2zm-4 3H7v-2h6v2zm4-6H7V6h10v2z" />
+          </svg>
+        </div>
+        <div class="app-meta">
+          <div class="app-name">Google Messages</div>
+          <div class="app-sub">Desktop wrapper &amp; background listener</div>
+        </div>
+        <span class="app-badge">v1.3</span>
+      </div>
+
+      <!-- Appearance -->
+      <div class="section">
+        <div class="section-title">Appearance</div>
+        <div class="card">
+          <div class="row">
+            <div class="row-left">
+              <div class="row-icon icon-purple" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z" />
+                </svg>
+              </div>
+              <div class="row-text">
+                <div class="setting-title">Theme</div>
+                <div class="setting-desc">Match your system appearance or force light/dark mode.</div>
+              </div>
+            </div>
+            <div class="segmented" role="radiogroup" aria-label="Theme">
+              <button type="button" class="seg-btn active" data-theme-val="system">System</button>
+              <button type="button" class="seg-btn" data-theme-val="light">Light</button>
+              <button type="button" class="seg-btn" data-theme-val="dark">Dark</button>
+            </div>
+            <select id="theme" hidden>
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
           </div>
-          <label class="switch">
-            <input id="launchAtLogin" type="checkbox" />
-            <span class="slider"></span>
-          </label>
         </div>
       </div>
 
-      <div class="setting">
-        <div class="setting-label">
-          <div>
-            <div class="setting-title">Start in tray</div>
-            <div class="setting-desc">Hide the main window on launch and start as a tray icon only. Applies at next launch.</div>
+      <!-- Startup & Window -->
+      <div class="section">
+        <div class="section-title">Startup &amp; Window</div>
+        <div class="card">
+          <div class="row interactive" data-toggle-for="launchAtLogin">
+            <div class="row-left">
+              <div class="row-icon icon-blue" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M13 3h-2v10h2V3zm4.83 2.17-1.42 1.42A6.92 6.92 0 0 1 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.05.88-3.9 2.29-5.18L5.88 5.4A8.96 8.96 0 0 0 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z" />
+                </svg>
+              </div>
+              <div class="row-text">
+                <div class="setting-title">Launch at login</div>
+                <div class="setting-desc">Start Google Messages automatically when you sign in.</div>
+              </div>
+            </div>
+            <label class="switch">
+              <input id="launchAtLogin" type="checkbox" />
+              <span class="slider"></span>
+            </label>
           </div>
-          <label class="switch">
-            <input id="startInTray" type="checkbox" />
-            <span class="slider"></span>
-          </label>
+
+          <div class="row interactive" data-toggle-for="startInTray">
+            <div class="row-left">
+              <div class="row-icon icon-teal" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5v-3h3.56c.69 1.19 1.97 2 3.45 2s2.75-.81 3.45-2H19v3zm0-5h-4.99c0 1.1-.9 2-2 2s-2-.9-2-2H5V5h14v9z" />
+                </svg>
+              </div>
+              <div class="row-text">
+                <div class="setting-title">Start in system tray</div>
+                <div class="setting-desc">Launch hidden in the tray without opening the main window.</div>
+              </div>
+            </div>
+            <label class="switch">
+              <input id="startInTray" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
         </div>
       </div>
 
-      <div class="setting">
-        <div class="setting-label">
-          <div>
-            <div class="setting-title">Show notifications</div>
-            <div class="setting-desc">Allow the app to display web notifications.</div>
+      <!-- Notifications & Background -->
+      <div class="section">
+        <div class="section-title">Notifications &amp; Background</div>
+        <div class="card">
+          <div class="row interactive" data-toggle-for="showNotifications">
+            <div class="row-left">
+              <div class="row-icon icon-amber" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 22c1.1 0 2-.9 2-2h-4a2 2 0 0 0 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z" />
+                </svg>
+              </div>
+              <div class="row-text">
+                <div class="setting-title">Show desktop notifications</div>
+                <div class="setting-desc">Display native alerts for incoming messages and session changes.</div>
+              </div>
+            </div>
+            <label class="switch">
+              <input id="showNotifications" type="checkbox" />
+              <span class="slider"></span>
+            </label>
           </div>
-          <label class="switch">
-            <input id="showNotifications" type="checkbox" />
-            <span class="slider"></span>
-          </label>
+
+          <div class="row interactive" data-toggle-for="backgroundKeepAlive">
+            <div class="row-left">
+              <div class="row-icon icon-green" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14.5v-5H8l5-7v5h3l-5 7z" />
+                </svg>
+              </div>
+              <div class="row-text">
+                <div class="setting-title">Keep connected in background</div>
+                <div class="setting-desc">Prevent OS throttling in the tray and auto-recover stalled connections. Pauses if open on another computer.</div>
+              </div>
+            </div>
+            <label class="switch">
+              <input id="backgroundKeepAlive" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
         </div>
       </div>
 
-      <div class="setting">
-        <label for="theme">Theme</label>
-        <select id="theme">
-          <option value="system">System</option>
-          <option value="light">Light</option>
-          <option value="dark">Dark</option>
-        </select>
+      <!-- Connection -->
+      <div class="section">
+        <div class="section-title">Advanced</div>
+        <div class="card">
+          <div class="row row-stacked">
+            <div class="row-left">
+              <div class="row-icon icon-slate" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z" />
+                </svg>
+              </div>
+              <div class="row-text">
+                <div class="setting-title">Start URL</div>
+                <div class="setting-desc">Custom startup URL (leave blank for default Google Messages).</div>
+              </div>
+            </div>
+            <div class="url-field-wrap">
+              <input id="startUrl" type="text" placeholder="https://messages.google.com/web/" spellcheck="false" />
+              <button type="button" id="resetUrlBtn" class="reset-btn" title="Reset to default URL">Default</button>
+            </div>
+          </div>
+        </div>
       </div>
-
-      <div class="setting">
-        <label for="startUrl">Start URL</label>
-        <input id="startUrl" type="text" placeholder="https://messages.google.com/web/" />
-        <div class="setting-desc">URL loaded when the app launches. Leave empty for Google Messages. Applies at next launch.</div>
-      </div>
-
-      <div class="row-actions">
-        <button id="closeBtn">Close</button>
-        <button id="saveBtn" class="primary">Save</button>
-      </div>
-      <div id="status" class="status"></div>
     </main>
+
+    <footer>
+      <div id="status" class="status"></div>
+      <div class="footer-actions">
+        <button type="button" id="closeBtn" class="btn">Close</button>
+        <button type="button" id="saveBtn" class="btn primary">Save</button>
+      </div>
+    </footer>
 
     <script>
       const launchAtLogin = document.getElementById('launchAtLogin');
       const startInTray = document.getElementById('startInTray');
       const showNotifications = document.getElementById('showNotifications');
+      const backgroundKeepAlive = document.getElementById('backgroundKeepAlive');
       const theme = document.getElementById('theme');
+      const themeButtons = document.querySelectorAll('.seg-btn[data-theme-val]');
       const startUrl = document.getElementById('startUrl');
+      const resetUrlBtn = document.getElementById('resetUrlBtn');
       const saveBtn = document.getElementById('saveBtn');
       const closeBtn = document.getElementById('closeBtn');
       const status = document.getElementById('status');
 
       let currentSettings = {};
+      let statusTimer = null;
 
-      function showStatus(text) {
+      function showStatus(text, isError) {
+        if (statusTimer) clearTimeout(statusTimer);
         status.textContent = text;
-        setTimeout(() => { status.textContent = ''; }, 2500);
+        status.className = 'status ' + (isError ? 'err' : 'ok');
+        statusTimer = setTimeout(() => {
+          status.textContent = '';
+          status.className = 'status';
+        }, 2500);
       }
 
       function invoke(cmd, args) {
@@ -224,8 +663,6 @@
         return Promise.reject(new Error('Tauri API not available'));
       }
 
-      // Empty is fine (falls back to Google Messages); otherwise require a
-      // well-formed http(s) URL, since it's what the main window loads on boot.
       function validStartUrl(value) {
         if (!value) return true;
         try {
@@ -236,11 +673,21 @@
         }
       }
 
+      function syncThemeUI(val) {
+        const normalized = val || 'system';
+        theme.value = normalized;
+        document.documentElement.setAttribute('data-theme', normalized);
+        themeButtons.forEach((btn) => {
+          btn.classList.toggle('active', btn.getAttribute('data-theme-val') === normalized);
+        });
+      }
+
       function readForm() {
         return {
           launch_at_login: launchAtLogin.checked,
           start_in_tray: startInTray.checked,
           show_notifications: showNotifications.checked,
+          background_keep_alive: backgroundKeepAlive.checked,
           theme: theme.value,
           start_url: startUrl.value.trim() || null,
         };
@@ -251,7 +698,8 @@
         launchAtLogin.checked = !!currentSettings.launch_at_login;
         startInTray.checked = !!currentSettings.start_in_tray;
         showNotifications.checked = !!currentSettings.show_notifications;
-        theme.value = currentSettings.theme || 'system';
+        backgroundKeepAlive.checked = currentSettings.background_keep_alive !== false;
+        syncThemeUI(currentSettings.theme || 'system');
         startUrl.value = currentSettings.start_url || '';
       }
 
@@ -261,23 +709,23 @@
           applyForm(settings);
         } catch (e) {
           console.error('Failed to load settings:', e);
-          showStatus('Failed to load settings');
+          showStatus('Failed to load settings', true);
         }
       }
 
       async function save() {
         const settings = readForm();
         if (!validStartUrl(settings.start_url)) {
-          showStatus('Start URL must be a full http(s) URL.');
+          showStatus('Start URL must be a valid http(s) URL', true);
           return;
         }
         try {
           await invoke('set_settings', { settings });
           applyForm(settings);
-          showStatus('Saved.');
+          showStatus('Saved', false);
         } catch (e) {
           console.error('Failed to save settings:', e);
-          showStatus('Failed to save settings');
+          showStatus('Failed to save settings', true);
         }
       }
 
@@ -286,6 +734,36 @@
           console.error('Failed to close window:', e);
         });
       }
+
+      // Segmented theme buttons apply & auto-save immediately
+      themeButtons.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          syncThemeUI(btn.getAttribute('data-theme-val'));
+          save();
+        });
+      });
+
+      // Clicking anywhere on an interactive toggle row flips its switch & auto-saves
+      document.querySelectorAll('.row[data-toggle-for]').forEach((row) => {
+        row.addEventListener('click', (e) => {
+          if (e.target.closest('label.switch')) return;
+          const id = row.getAttribute('data-toggle-for');
+          const input = document.getElementById(id);
+          if (input) {
+            input.checked = !input.checked;
+            save();
+          }
+        });
+      });
+
+      [launchAtLogin, startInTray, showNotifications, backgroundKeepAlive].forEach((el) => {
+        el.addEventListener('change', save);
+      });
+
+      resetUrlBtn.addEventListener('click', () => {
+        startUrl.value = '';
+        save();
+      });
 
       saveBtn.addEventListener('click', save);
       closeBtn.addEventListener('click', closeWindow);

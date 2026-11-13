@@ -1,6 +1,6 @@
 [package]
 name = "google-messages"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 
 [lib]
@@ -13,20 +13,27 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
-tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Windows-only: needed to auto-grant WebView2 microphone/camera permission
-# requests so calls work without a per-session prompt. Version pinned to match
-# what wry 0.55 uses, so the COM types unify.
+# macOS-only: native NSUserNotificationCenter click/action handling and
+# NSProcessInfo App Nap activity control for reliable background operation.
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-notification-sys = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString", "NSObject", "NSUserNotification"] }
+
+# Windows-only: needed to auto-grant WebView2 microphone/camera/notification
+# permission requests so calls and notifications work without prompts. Version
+# pinned to match what wry 0.55 uses, so the COM types unify.
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
 
 # Linux-only: needed to enable WebKitGTK media-stream/WebRTC settings and
-# auto-grant user-media permission requests so calls work. Version pinned to
-# match what wry 0.55 uses.
+# auto-grant user-media permission requests so calls work, plus D-Bus desktop
+# notifications with click/action handling.
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
+notify-rust = "4"
