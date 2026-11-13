@@ -179,6 +179,19 @@
       </div>
 
       <div class="setting">
+        <div class="setting-label">
+          <div>
+            <div class="setting-title">Keep connected in background</div>
+            <div class="setting-desc">Prevent background throttling while in the tray and recover stalled connections. Pauses automatically if Messages is open on another computer.</div>
+          </div>
+          <label class="switch">
+            <input id="backgroundKeepAlive" type="checkbox" />
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="setting">
         <label for="theme">Theme</label>
         <select id="theme">
           <option value="system">System</option>
@@ -204,6 +217,7 @@
       const launchAtLogin = document.getElementById('launchAtLogin');
       const startInTray = document.getElementById('startInTray');
       const showNotifications = document.getElementById('showNotifications');
+      const backgroundKeepAlive = document.getElementById('backgroundKeepAlive');
       const theme = document.getElementById('theme');
       const startUrl = document.getElementById('startUrl');
       const saveBtn = document.getElementById('saveBtn');
@@ -241,6 +255,7 @@
           launch_at_login: launchAtLogin.checked,
           start_in_tray: startInTray.checked,
           show_notifications: showNotifications.checked,
+          background_keep_alive: backgroundKeepAlive.checked,
           theme: theme.value,
           start_url: startUrl.value.trim() || null,
         };
@@ -251,6 +266,7 @@
         launchAtLogin.checked = !!currentSettings.launch_at_login;
         startInTray.checked = !!currentSettings.start_in_tray;
         showNotifications.checked = !!currentSettings.show_notifications;
+        backgroundKeepAlive.checked = currentSettings.background_keep_alive !== false;
         theme.value = currentSettings.theme || 'system';
         startUrl.value = currentSettings.start_url || '';
       }

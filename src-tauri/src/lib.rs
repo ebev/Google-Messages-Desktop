@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::sync::{
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     OnceLock,
 };
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -24,6 +25,21 @@ static BADGED_TRAY_ICON: OnceLock<(Vec<u8>, u32, u32)> = OnceLock::new();
 
 // Tracks the main window's zoom percentage (100 = 1.0x, clamped to 50..=250).
 static ZOOM_PERCENT: AtomicU32 = AtomicU32::new(100);
+
+// Live runtime flags mirrored from Settings and page state:
+static SHOW_NOTIFICATIONS: AtomicBool = AtomicBool::new(true);
+static BACKGROUND_KEEP_ALIVE: AtomicBool = AtomicBool::new(true);
+// True when "Google Messages is open on another computer" is active and the
+// user hasn't switched the session back here; while true, background keep-alive
+// and auto-refresh are paused so the OS can sleep the app normally.
+static SESSION_YIELDED: AtomicBool = AtomicBool::new(false);
+// Ensures we only pop one notification per transition into the yielded state.
+static TAKEOVER_NOTIFIED: AtomicBool = AtomicBool::new(false);
+// Watchdog counters for the background heartbeat loop.
+static PENDING_HEARTBEAT_PINGS: AtomicU32 = AtomicU32::new(0);
+static UNHEALTHY_STREAK: AtomicU32 = AtomicU32::new(0);
+static LAST_AUTO_RELOAD_SECS: AtomicU64 = AtomicU64::new(0);
+
 // Default start URL if the user has not customized it. The canonical web
 // entry point: when already paired this lands straight on the (cached)
 // conversation list; when not paired it redirects to the QR pairing page on
@@ -42,6 +58,9 @@ struct Settings {
     start_url: Option<String>,
     /// When true, the app shows native web notifications (the web app's own).
     show_notifications: bool,
+    /// When true, keeps the webview active in the background and recovers
+    /// stalled connections (automatically pauses if open on another computer).
+    background_keep_alive: bool,
     /// UI theme override: "system", "light", or "dark".
     theme: Option<String>,
     /// Remembered window geometry for the main webview.
@@ -55,9 +74,11 @@ impl Default for Settings {
         Self {
             start_in_tray: false,
             start_url: None,
-            // Notifications on by default — also the fallback for settings.json
-            // files written before this field existed (via #[serde(default)]).
+            // Notifications and background keep-alive on by default — also the
+            // fallback for settings.json files written before these fields
+            // existed (via #[serde(default)]).
             show_notifications: true,
+            background_keep_alive: true,
             theme: None,
             main_window_size: None,
             launch_at_login: false,
@@ -168,16 +189,22 @@ fn set_settings(app: tauri::AppHandle, mut settings: Settings) {
 
     // Apply what can take effect immediately. (start_url and start_in_tray
     // naturally apply on next launch.)
+    SHOW_NOTIFICATIONS.store(settings.show_notifications, Ordering::Relaxed);
+    BACKGROUND_KEEP_ALIVE.store(settings.background_keep_alive, Ordering::Relaxed);
+    sync_os_keep_alive(&app);
+
     let theme = parse_theme(settings.theme.as_deref());
     for window in app.webview_windows().values() {
         let _ = window.set_theme(theme);
-        let effective = theme.or_else(|| window.theme().ok()).unwrap_or(tauri::Theme::Light);
+        let effective = theme
+            .or_else(|| window.theme().ok())
+            .unwrap_or(tauri::Theme::Light);
         let _ = window.set_background_color(Some(theme_bg_color(effective)));
     }
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.eval(&format!(
-            "window.__GM_SHOW_NOTIFICATIONS = {};",
-            settings.show_notifications
+            "window.__GM_SHOW_NOTIFICATIONS = {}; window.__GM_BACKGROUND_KEEP_ALIVE = {};",
+            settings.show_notifications, settings.background_keep_alive
         ));
     }
 }
@@ -201,16 +228,13 @@ fn show_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     } else {
         let settings = load_settings(app);
         #[allow(unused_mut)]
-        let mut builder = WebviewWindowBuilder::new(
-            app,
-            "settings",
-            WebviewUrl::App("settings.html".into()),
-        )
-        .title("Settings")
-        .inner_size(480.0, 540.0)
-        .min_inner_size(360.0, 420.0)
-        .theme(parse_theme(settings.theme.as_deref()))
-        .center();
+        let mut builder =
+            WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
+                .title("Settings")
+                .inner_size(480.0, 540.0)
+                .min_inner_size(360.0, 420.0)
+                .theme(parse_theme(settings.theme.as_deref()))
+                .center();
         #[cfg(windows)]
         {
             builder = builder
@@ -241,7 +265,6 @@ pub fn run() {
             // If a second instance is launched, focus the existing window
             show_main_window(app);
         }))
-        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -253,12 +276,15 @@ pub fn run() {
             settings.launch_at_login = app.autolaunch().is_enabled().unwrap_or(false);
             save_settings(app.handle(), &settings);
 
+            SHOW_NOTIFICATIONS.store(settings.show_notifications, Ordering::Relaxed);
+            BACKGROUND_KEEP_ALIVE.store(settings.background_keep_alive, Ordering::Relaxed);
+            #[cfg(target_os = "macos")]
+            macos_native::init_notifications(app.handle());
+            sync_os_keep_alive(app.handle());
+
             // Build the main window pointing at Google Messages. If the user
             // chose "Start in Tray", build it hidden.
-            let start_url = settings
-                .start_url
-                .as_deref()
-                .unwrap_or(DEFAULT_START_URL);
+            let start_url = settings.start_url.as_deref().unwrap_or(DEFAULT_START_URL);
             // Restore the remembered window geometry, clamped to the window
             // minimum in case the persisted file was edited or corrupted.
             let saved_geom = settings.main_window_size.clone();
@@ -266,10 +292,23 @@ pub fn run() {
                 .as_ref()
                 .map(|s| (s.width.max(400.0), s.height.max(500.0)))
                 .unwrap_or((1100.0, 780.0));
-            let init_script = INIT_SCRIPT.replace(
-                "__GM_NOTIFICATIONS_DEFAULT__",
-                if settings.show_notifications { "true" } else { "false" },
-            );
+            let init_script = INIT_SCRIPT
+                .replace(
+                    "__GM_NOTIFICATIONS_DEFAULT__",
+                    if settings.show_notifications {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                )
+                .replace(
+                    "__GM_KEEP_ALIVE_DEFAULT__",
+                    if settings.background_keep_alive {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                );
             let explicit_theme = parse_theme(settings.theme.as_deref());
             let mut builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::External(start_url.parse()?))
@@ -277,10 +316,11 @@ pub fn run() {
                     .inner_size(width, height)
                     .min_inner_size(400.0, 500.0)
                     .theme(explicit_theme)
-                    .background_color(theme_bg_color(
-                        explicit_theme.unwrap_or(tauri::Theme::Dark),
-                    ))
+                    .background_color(theme_bg_color(explicit_theme.unwrap_or(tauri::Theme::Dark)))
                     .visible(!settings.start_in_tray)
+                    .background_throttling(
+                        tauri::utils::config::BackgroundThrottlingPolicy::Disabled,
+                    )
                     .initialization_script_for_all_frames(&init_script);
             #[cfg(not(target_os = "macos"))]
             {
@@ -290,7 +330,13 @@ pub fn run() {
             {
                 builder = builder
                     .scroll_bar_style(tauri::webview::ScrollBarStyle::FluentOverlay)
-                    .browser_accelerator_keys(false);
+                    .browser_accelerator_keys(false)
+                    .additional_browser_args(
+                        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+                         --disable-background-timer-throttling \
+                         --disable-renderer-backgrounding \
+                         --disable-backgrounding-occluded-windows",
+                    );
             }
             let new_win_app = app.handle().clone();
             builder = builder.on_new_window(move |url, _features| {
@@ -349,6 +395,7 @@ pub fn run() {
                     .handle()
                     .set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
+            start_background_listener(app.handle().clone());
             Ok(())
         })
         // Close the main window to tray instead of quitting; other windows
@@ -368,22 +415,25 @@ pub fn run() {
             set_settings,
             open_settings,
             focus_main_window,
-            adjust_zoom
+            adjust_zoom,
+            send_native_notification,
+            report_heartbeat,
+            set_session_yielded,
+            prompt_takeover_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
-// Auto-allow microphone & camera permission requests in the WebView2 webview so
-// the calls app works without prompting the user every session. Mirrors the
-// pattern wry uses internally for clipboard. WebView2's default would otherwise
-// show a prompt each time. (The OS-level "let desktop apps use the microphone"
-// privacy toggle must still be enabled by the user.)
+// Auto-allow microphone, camera, and notification permission requests in the
+// WebView2 webview so calls and background notifications work without prompting
+// the user every session. Mirrors the pattern wry uses internally for clipboard.
 #[cfg(windows)]
 fn grant_media_permissions(window: &tauri::WebviewWindow) {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
-        COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+        COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS,
+        COREWEBVIEW2_PERMISSION_STATE_ALLOW,
     };
     use webview2_com::PermissionRequestedEventHandler;
 
@@ -398,6 +448,7 @@ fn grant_media_permissions(window: &tauri::WebviewWindow) {
                         args.PermissionKind(&mut kind)?;
                         if kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE
                             || kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
+                            || kind == COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS
                         {
                             args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
                         }
@@ -454,6 +505,384 @@ fn focus_main_window(app: tauri::AppHandle) {
     #[cfg(debug_assertions)]
     eprintln!("[ipc] focus_main_window invoked");
     show_main_window(&app);
+}
+
+// Opens and focuses the main window and asks the user whether to move the
+// active Google Messages session back to this computer.
+fn open_and_prompt_takeover(app: &tauri::AppHandle) {
+    show_main_window(app);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ =
+            window.eval("window.__GM_SHOW_TAKEOVER_PROMPT && window.__GM_SHOW_TAKEOVER_PROMPT();");
+    }
+}
+
+#[tauri::command]
+fn prompt_takeover_session(app: tauri::AppHandle) {
+    #[cfg(debug_assertions)]
+    eprintln!("[ipc] prompt_takeover_session invoked");
+    open_and_prompt_takeover(&app);
+}
+
+// Syncs the OS-level background activity assertion (macOS App Nap prevention)
+// with the current `BACKGROUND_KEEP_ALIVE` setting and `SESSION_YIELDED` state.
+// When the session is yielded to another computer (or keep-alive is disabled),
+// the assertion is released so the OS can sleep the app normally.
+fn sync_os_keep_alive(app: &tauri::AppHandle) {
+    let active =
+        BACKGROUND_KEEP_ALIVE.load(Ordering::Relaxed) && !SESSION_YIELDED.load(Ordering::Relaxed);
+    #[cfg(target_os = "macos")]
+    macos_native::set_keep_alive(app, active);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, active);
+}
+
+// Called from JS when "Google Messages is open on another computer" appears or
+// clears. When `yielded` becomes true, we pause background keep-alive/reloads
+// (allowing OS sleep) and pop a single notification offering to switch back.
+#[tauri::command]
+fn set_session_yielded(app: tauri::AppHandle, yielded: bool) {
+    #[cfg(debug_assertions)]
+    eprintln!("[ipc] set_session_yielded({yielded})");
+
+    let was_yielded = SESSION_YIELDED.swap(yielded, Ordering::Relaxed);
+    sync_os_keep_alive(&app);
+
+    if yielded {
+        PENDING_HEARTBEAT_PINGS.store(0, Ordering::Relaxed);
+        UNHEALTHY_STREAK.store(0, Ordering::Relaxed);
+        if !was_yielded && !TAKEOVER_NOTIFIED.swap(true, Ordering::Relaxed) {
+            let main_focused = app.get_webview_window("main").is_some_and(|w| {
+                w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false)
+            });
+            if !main_focused && SHOW_NOTIFICATIONS.load(Ordering::Relaxed) {
+                send_os_notification(
+                    &app,
+                    "Google Messages is open on another computer".to_string(),
+                    "Click to open and move the session here, or ignore to let the app sleep."
+                        .to_string(),
+                    true,
+                );
+            }
+        }
+    } else {
+        TAKEOVER_NOTIFIED.store(false, Ordering::Relaxed);
+    }
+}
+
+#[tauri::command]
+fn send_native_notification(app: tauri::AppHandle, title: String, body: String, kind: String) {
+    #[cfg(debug_assertions)]
+    eprintln!("[ipc] send_native_notification(kind={kind}, title={title})");
+    if !SHOW_NOTIFICATIONS.load(Ordering::Relaxed) {
+        return;
+    }
+    send_os_notification(&app, title, body, kind == "takeover");
+}
+
+#[tauri::command]
+fn report_heartbeat(app: tauri::AppHandle, healthy: bool, reason: Option<String>) {
+    #[cfg(debug_assertions)]
+    eprintln!("[ipc] report_heartbeat(healthy={healthy}, reason={reason:?})");
+
+    PENDING_HEARTBEAT_PINGS.store(0, Ordering::Relaxed);
+    if healthy || reason.as_deref() == Some("offline") {
+        UNHEALTHY_STREAK.store(0, Ordering::Relaxed);
+        return;
+    }
+
+    if !BACKGROUND_KEEP_ALIVE.load(Ordering::Relaxed) || SESSION_YIELDED.load(Ordering::Relaxed) {
+        UNHEALTHY_STREAK.store(0, Ordering::Relaxed);
+        return;
+    }
+
+    let streak = UNHEALTHY_STREAK.fetch_add(1, Ordering::Relaxed) + 1;
+    if streak >= 2 {
+        UNHEALTHY_STREAK.store(0, Ordering::Relaxed);
+        try_reload_main_window(&app, "stalled connection");
+    }
+}
+
+fn now_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn try_reload_main_window(app: &tauri::AppHandle, reason: &str) {
+    let now = now_epoch_secs();
+    let last = LAST_AUTO_RELOAD_SECS.load(Ordering::Relaxed);
+    // Enforce a 120-second cooldown so auto-reload can never loop.
+    if now.saturating_sub(last) < 120 {
+        return;
+    }
+    LAST_AUTO_RELOAD_SECS.store(now, Ordering::Relaxed);
+    #[cfg(debug_assertions)]
+    eprintln!("[watchdog] reloading main window ({reason})");
+    let _ = reason;
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.eval(
+            "if (location.host === 'messages.google.com' && navigator.onLine !== false) { location.reload(); }",
+        );
+    }
+}
+
+// Background listener thread: wakes every 30s to nudge the hidden webview,
+// detect sleep/wake jumps, and verify connection health when keep-alive is
+// active and the session has not been yielded to another computer.
+fn start_background_listener(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let mut last_tick = now_epoch_secs();
+        loop {
+            std::thread::sleep(Duration::from_secs(30));
+            let now = now_epoch_secs();
+            let elapsed = now.saturating_sub(last_tick);
+            last_tick = now;
+
+            if !BACKGROUND_KEEP_ALIVE.load(Ordering::Relaxed)
+                || SESSION_YIELDED.load(Ordering::Relaxed)
+            {
+                PENDING_HEARTBEAT_PINGS.store(0, Ordering::Relaxed);
+                UNHEALTHY_STREAK.store(0, Ordering::Relaxed);
+                continue;
+            }
+
+            // If wall-clock time jumped by >= 90s for a 30s sleep, the machine
+            // just woke from OS sleep — give networking 6s to settle first.
+            let woke_from_sleep = elapsed >= 90;
+            if woke_from_sleep {
+                PENDING_HEARTBEAT_PINGS.store(0, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_secs(6));
+            }
+
+            let pending = PENDING_HEARTBEAT_PINGS.fetch_add(1, Ordering::Relaxed) + 1;
+            if pending >= 3 {
+                PENDING_HEARTBEAT_PINGS.store(0, Ordering::Relaxed);
+                try_reload_main_window(&app, "unresponsive webview");
+                continue;
+            }
+
+            if let Some(window) = app.get_webview_window("main") {
+                let arg = if woke_from_sleep { "true" } else { "false" };
+                let _ = window.eval(&format!(
+                    "window.__gmHeartbeat && window.__gmHeartbeat({arg});"
+                ));
+            }
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+// NSUserNotificationCenter works in ad-hoc signed and dev builds without an
+// Apple Developer provisioning profile (unlike UNUserNotificationCenter).
+#[allow(deprecated)]
+mod macos_native {
+    use objc2::{
+        define_class, msg_send, rc::Retained, runtime::ProtocolObject, DefinedClass,
+        MainThreadMarker, MainThreadOnly,
+    };
+    use objc2_foundation::{
+        ns_string, NSActivityOptions, NSObject, NSObjectProtocol, NSProcessInfo, NSString,
+        NSUserNotification, NSUserNotificationActivationType, NSUserNotificationCenter,
+        NSUserNotificationCenterDelegate, NSUserNotificationDefaultSoundName,
+    };
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static NOTIF_SEQ: AtomicU32 = AtomicU32::new(1);
+
+    struct GmNotificationDelegateIvars {
+        app: tauri::AppHandle,
+    }
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[ivars = GmNotificationDelegateIvars]
+        struct GmNotificationDelegate;
+
+        unsafe impl NSObjectProtocol for GmNotificationDelegate {}
+
+        #[allow(deprecated)]
+        unsafe impl NSUserNotificationCenterDelegate for GmNotificationDelegate {
+            #[unsafe(method(userNotificationCenter:didActivateNotification:))]
+            fn did_activate(
+                &self,
+                center: &NSUserNotificationCenter,
+                notification: &NSUserNotification,
+            ) {
+                let id = notification
+                    .identifier()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let activation = notification.activationType();
+                center.removeDeliveredNotification(notification);
+                let clicked = activation == NSUserNotificationActivationType::ContentsClicked
+                    || activation == NSUserNotificationActivationType::ActionButtonClicked;
+                if !clicked {
+                    return;
+                }
+                let app = &self.ivars().app;
+                if id.starts_with("gm-takeover") {
+                    crate::open_and_prompt_takeover(app);
+                } else {
+                    crate::show_main_window(app);
+                }
+            }
+
+            #[unsafe(method(userNotificationCenter:shouldPresentNotification:))]
+            fn should_present(
+                &self,
+                _center: &NSUserNotificationCenter,
+                _notification: &NSUserNotification,
+            ) -> bool {
+                true
+            }
+        }
+    );
+
+    impl GmNotificationDelegate {
+        fn new(mtm: MainThreadMarker, app: tauri::AppHandle) -> Retained<Self> {
+            let delegate = mtm
+                .alloc::<GmNotificationDelegate>()
+                .set_ivars(GmNotificationDelegateIvars { app });
+            unsafe { msg_send![super(delegate), init] }
+        }
+    }
+
+    thread_local! {
+        static ACTIVITY_TOKEN: RefCell<Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>> =
+            const { RefCell::new(None) };
+        static NOTIF_DELEGATE: RefCell<Option<Retained<GmNotificationDelegate>>> =
+            const { RefCell::new(None) };
+    }
+
+    pub fn init_notifications(app: &tauri::AppHandle) {
+        if tauri::is_dev() {
+            let _ = mac_notification_sys::set_application("com.apple.Terminal");
+        }
+        let app_clone = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let delegate = GmNotificationDelegate::new(mtm, app_clone);
+            let proto = ProtocolObject::from_ref(&*delegate);
+            #[allow(deprecated)]
+            unsafe {
+                NSUserNotificationCenter::defaultUserNotificationCenter().setDelegate(Some(proto));
+            }
+            NOTIF_DELEGATE.with(|slot| {
+                *slot.borrow_mut() = Some(delegate);
+            });
+        });
+    }
+
+    pub fn set_keep_alive(app: &tauri::AppHandle, enabled: bool) {
+        let _ = app.run_on_main_thread(move || {
+            ACTIVITY_TOKEN.with(|slot| {
+                let mut guard = slot.borrow_mut();
+                if enabled && guard.is_none() {
+                    let info = NSProcessInfo::processInfo();
+                    let token = info.beginActivityWithOptions_reason(
+                        NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+                        ns_string!("Keep Google Messages connected in background"),
+                    );
+                    *guard = Some(token);
+                } else if !enabled {
+                    if let Some(token) = guard.take() {
+                        let info = NSProcessInfo::processInfo();
+                        unsafe { info.endActivity(&token) };
+                    }
+                }
+            });
+        });
+    }
+
+    pub fn send_notification(
+        app: &tauri::AppHandle,
+        title: String,
+        body: String,
+        is_takeover: bool,
+    ) {
+        let _ = app.run_on_main_thread(move || {
+            #[allow(deprecated)]
+            {
+                let notif = NSUserNotification::new();
+                notif.setTitle(Some(&NSString::from_str(&title)));
+                if !body.is_empty() {
+                    notif.setInformativeText(Some(&NSString::from_str(&body)));
+                }
+                let seq = NOTIF_SEQ.fetch_add(1, Ordering::Relaxed);
+                let id = if is_takeover {
+                    format!("gm-takeover-{seq}")
+                } else {
+                    format!("gm-msg-{seq}")
+                };
+                notif.setIdentifier(Some(&NSString::from_str(&id)));
+                unsafe {
+                    notif.setSoundName(Some(NSUserNotificationDefaultSoundName));
+                }
+                if is_takeover {
+                    notif.setHasActionButton(true);
+                    notif.setActionButtonTitle(ns_string!("Switch Here"));
+                    notif.setOtherButtonTitle(ns_string!("No"));
+                }
+                let center = NSUserNotificationCenter::defaultUserNotificationCenter();
+                center.deliverNotification(&notif);
+            }
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn send_os_notification(app: &tauri::AppHandle, title: String, body: String, is_takeover: bool) {
+    macos_native::send_notification(app, title, body, is_takeover);
+}
+
+#[cfg(target_os = "linux")]
+fn send_os_notification(app: &tauri::AppHandle, title: String, body: String, is_takeover: bool) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let mut n = notify_rust::Notification::new();
+        n.summary(&title).body(&body).auto_icon();
+        if is_takeover {
+            n.action("default", "Open")
+                .action("use_here", "Switch Here")
+                .action("no", "No");
+        } else {
+            n.action("default", "Open");
+        }
+        if let Ok(handle) = n.show() {
+            handle.wait_for_action(|action| match action {
+                "default" | "use_here" => {
+                    if is_takeover {
+                        open_and_prompt_takeover(&app);
+                    } else {
+                        show_main_window(&app);
+                    }
+                }
+                _ => {}
+            });
+        }
+    });
+}
+
+#[cfg(windows)]
+fn send_os_notification(app: &tauri::AppHandle, title: String, body: String, is_takeover: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let (Ok(t), Ok(b)) = (serde_json::to_string(&title), serde_json::to_string(&body)) {
+            let kind = if is_takeover {
+                "\"takeover\""
+            } else {
+                "\"message\""
+            };
+            let _ = window.eval(&format!(
+                "window.__gmShowWebviewNotification && window.__gmShowWebviewNotification({t}, {b}, {kind});"
+            ));
+        }
+    }
 }
 
 // Adjusts the main webview's native zoom factor ("in", "out", or "reset").
@@ -708,41 +1137,41 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     }
 
     tray.on_menu_event(|app, event| match event.id().as_ref() {
-            "show" => {
-                show_main_window(app);
+        "show" => {
+            show_main_window(app);
+        }
+        "settings" => {
+            let _ = show_settings_window(app);
+        }
+        "quit" => {
+            // Capture the final window size before exiting; the visible
+            // window never fires CloseRequested on this path.
+            if let Some(window) = app.get_webview_window("main") {
+                save_main_window_size(&window.as_ref().window());
             }
-            "settings" => {
-                let _ = show_settings_window(app);
-            }
-            "quit" => {
-                // Capture the final window size before exiting; the visible
-                // window never fires CloseRequested on this path.
-                if let Some(window) = app.get_webview_window("main") {
-                    save_main_window_size(&window.as_ref().window());
+            app.exit(0);
+        }
+        _ => {}
+    })
+    .on_tray_icon_event(|tray, event| {
+        // Left-click toggles window visibility
+        if let TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } = event
+        {
+            let app = tray.app_handle();
+            if let Some(window) = app.get_webview_window("main") {
+                if window.is_visible().unwrap_or(false) {
+                    hide_main_window(app);
+                } else {
+                    show_main_window(app);
                 }
-                app.exit(0);
             }
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            // Left-click toggles window visibility
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                let app = tray.app_handle();
-                if let Some(window) = app.get_webview_window("main") {
-                    if window.is_visible().unwrap_or(false) {
-                        hide_main_window(app);
-                    } else {
-                        show_main_window(app);
-                    }
-                }
-            }
-        })
-        .build(app)?;
+        }
+    })
+    .build(app)?;
 
     Ok(())
 }
@@ -763,7 +1192,11 @@ fn open_external(app: tauri::AppHandle, url: String) {
 // Returns the base (no-unread) tray icon for the current platform.
 fn load_base_tray_icon() -> tauri::Result<tauri::image::Image<'static>> {
     if let Some((rgba, width, height)) = BASE_TRAY_ICON.get() {
-        return Ok(tauri::image::Image::new_owned(rgba.clone(), *width, *height));
+        return Ok(tauri::image::Image::new_owned(
+            rgba.clone(),
+            *width,
+            *height,
+        ));
     }
     #[cfg(target_os = "macos")]
     let img = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
@@ -781,7 +1214,11 @@ fn load_base_tray_icon() -> tauri::Result<tauri::image::Image<'static>> {
 //    match the menu bar alongside the bubble silhouette.
 fn load_badged_tray_icon() -> tauri::Result<tauri::image::Image<'static>> {
     if let Some((rgba, width, height)) = BADGED_TRAY_ICON.get() {
-        return Ok(tauri::image::Image::new_owned(rgba.clone(), *width, *height));
+        return Ok(tauri::image::Image::new_owned(
+            rgba.clone(),
+            *width,
+            *height,
+        ));
     }
     let base = load_base_tray_icon()?;
     let width = base.width();
@@ -1076,18 +1513,56 @@ const INIT_SCRIPT: &str = r#"
         return Promise.reject(new Error('Tauri IPC unavailable'));
     }
 
-    // --- Unread badge via title observation ---
+    // --- Unread badge via title observation (+ fallback notification) ---
     function parseUnread(title) {
         const m = title.match(/\((\d+)\)/);
         return m ? parseInt(m[1], 10) : 0;
     }
 
     let lastUnreadCount = null;
+    let lastWebNotifAt = 0;
+
+    function findLatestUnreadPreview() {
+        const items = document.querySelectorAll('mws-conversation-list-item');
+        for (let i = 0; i < items.length; i++) {
+            const el = items[i];
+            const aria = (el.getAttribute('aria-label') || '') + ' ' +
+                ((el.querySelector('[aria-label]') && el.querySelector('[aria-label]').getAttribute('aria-label')) || '');
+            const isUnread = /unread/i.test(aria) || el.querySelector('.unread, [data-e2e-is-unread="true"]');
+            if (isUnread) {
+                const nameEl = el.querySelector('[data-e2e-conversation-name], .name, h2, h3');
+                const snipEl = el.querySelector('mws-conversation-snippet, [data-e2e-conversation-snippet], .snippet');
+                const title = nameEl && nameEl.textContent ? nameEl.textContent.trim() : 'Google Messages';
+                const body = snipEl && snipEl.textContent ? snipEl.textContent.trim() : 'New unread message';
+                if (title || body) {
+                    return { title: title || 'Google Messages', body: body || 'New unread message' };
+                }
+            }
+        }
+        return null;
+    }
+
     function syncBadge() {
         const count = parseUnread(document.title);
         if (count === lastUnreadCount) return;
+        const prev = lastUnreadCount;
         lastUnreadCount = count;
         invoke('set_tray_badge', { count }).catch(function () {});
+
+        // Safety-net notification if the unread count increased while the
+        // window is unfocused/hidden and the web app didn't fire Notification.
+        if (prev !== null && count > prev && window.__GM_SHOW_NOTIFICATIONS !== false && !document.hasFocus()) {
+            setTimeout(function () {
+                if (Date.now() - lastWebNotifAt < 3000) return;
+                if (detectOtherSession()) return;
+                const preview = findLatestUnreadPreview();
+                const title = preview ? preview.title : 'Google Messages';
+                const body = preview
+                    ? preview.body
+                    : (count === 1 ? 'You have 1 unread message' : 'You have ' + count + ' unread messages');
+                dispatchNotification(title, body, 'message');
+            }, 1500);
+        }
     }
 
     const titleObserver = new MutationObserver(syncBadge);
@@ -1185,6 +1660,7 @@ const INIT_SCRIPT: &str = r#"
         observeTitle();
         placeGear();
         gearObserver.observe(document.body, { childList: true, subtree: true });
+        observeSessionState();
     }
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', onReady);
@@ -1409,37 +1885,317 @@ const INIT_SCRIPT: &str = r#"
         }
     }, true);
 
-    // --- Notifications: honor the "Show notifications" app setting & focus on click ---
-    // The flag is seeded from settings.json at injection time and updated live
-    // by set_settings. When off, hand back an inert stand-in so the page's own
-    // notification code keeps working without anything being shown. When on,
-    // clicking a notification restores and focuses the native window even if it
-    // was minimized or hidden to the system tray.
+    // --- Notifications, Session-Takeover Protection & Background Keep-Alive ---
     function focusAppWindow() {
         invoke('focus_main_window').catch(function () {});
     }
 
     window.__GM_SHOW_NOTIFICATIONS = __GM_NOTIFICATIONS_DEFAULT__;
+    window.__GM_BACKGROUND_KEEP_ALIVE = __GM_KEEP_ALIVE_DEFAULT__;
+
     const OrigNotification = window.Notification;
-    if (OrigNotification) {
-        function GMNotification(title, options) {
-            if (window.__GM_SHOW_NOTIFICATIONS === false) {
-                return {
-                    close: function () {},
-                    addEventListener: function () {},
-                    removeEventListener: function () {},
-                    dispatchEvent: function () { return false; }
-                };
-            }
-            const notif = new OrigNotification(title, options);
-            notif.addEventListener('click', focusAppWindow);
-            return notif;
-        }
-        GMNotification.requestPermission = OrigNotification.requestPermission.bind(OrigNotification);
-        Object.defineProperty(GMNotification, 'permission', {
-            get: function () { return OrigNotification.permission; }
-        });
-        window.Notification = GMNotification;
+    const useWebviewNotification = !isMac && !/Linux/.test(navigator.platform || '') && typeof OrigNotification === 'function';
+
+    if (useWebviewNotification && OrigNotification.permission === 'default' && window.__GM_SHOW_NOTIFICATIONS !== false) {
+        try {
+            const p = OrigNotification.requestPermission();
+            if (p && p.catch) p.catch(function () {});
+        } catch (_) {}
     }
+
+    function createNotificationStub() {
+        const listeners = {};
+        return {
+            onclick: null,
+            onshow: null,
+            onclose: null,
+            onerror: null,
+            close: function () {
+                if (typeof this.onclose === 'function') {
+                    try { this.onclose(); } catch (_) {}
+                }
+            },
+            addEventListener: function (type, fn) {
+                if (!listeners[type]) listeners[type] = [];
+                listeners[type].push(fn);
+            },
+            removeEventListener: function (type, fn) {
+                if (!listeners[type]) return;
+                listeners[type] = listeners[type].filter(function (f) { return f !== fn; });
+            },
+            dispatchEvent: function (evt) {
+                const list = (evt && listeners[evt.type]) || [];
+                for (let i = 0; i < list.length; i++) {
+                    try { list[i](evt); } catch (_) {}
+                }
+                return true;
+            }
+        };
+    }
+
+    function dispatchNotification(title, body, kind) {
+        if (window.__GM_SHOW_NOTIFICATIONS === false) {
+            return createNotificationStub();
+        }
+        if (kind === 'message') {
+            lastWebNotifAt = Date.now();
+        }
+        if (useWebviewNotification) {
+            try {
+                const n = new OrigNotification(title, {
+                    body: body || '',
+                    tag: kind === 'takeover' ? 'gm-session-takeover' : undefined
+                });
+                n.addEventListener('click', function () {
+                    if (kind === 'takeover') {
+                        invoke('prompt_takeover_session').catch(function () {});
+                    } else {
+                        focusAppWindow();
+                    }
+                });
+                return n;
+            } catch (_) {}
+        }
+        invoke('send_native_notification', {
+            title: String(title || 'Google Messages'),
+            body: String(body || ''),
+            kind: kind || 'message'
+        }).catch(function () {});
+        return createNotificationStub();
+    }
+
+    window.__gmShowWebviewNotification = function (title, body, kind) {
+        dispatchNotification(title, body, kind || 'message');
+    };
+
+    function GMNotification(title, options) {
+        const opts = options || {};
+        return dispatchNotification(title, opts.body || '', 'message');
+    }
+    GMNotification.requestPermission = function () {
+        if (useWebviewNotification && OrigNotification.requestPermission) {
+            return OrigNotification.requestPermission();
+        }
+        return Promise.resolve('granted');
+    };
+    Object.defineProperty(GMNotification, 'permission', {
+        get: function () {
+            if (useWebviewNotification && OrigNotification.permission && OrigNotification.permission !== 'default') {
+                return OrigNotification.permission;
+            }
+            return 'granted';
+        }
+    });
+    window.Notification = GMNotification;
+
+    // --- "Google Messages is open on another computer" protection ---
+    function isElementVisible(el) {
+        if (!el) return false;
+        const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+        return !!(r && r.width > 0 && r.height > 0);
+    }
+
+    function findUseHereButton() {
+        if (location.host !== 'messages.google.com') return null;
+        const buttons = document.querySelectorAll('button, [role="button"]');
+        for (let i = 0; i < buttons.length; i++) {
+            const btn = buttons[i];
+            if (!isElementVisible(btn)) continue;
+            const label = ((btn.textContent || '') + ' ' + (btn.getAttribute('aria-label') || '')).trim();
+            if (/^use here$/i.test(btn.textContent ? btn.textContent.trim() : '') || /\buse here\b/i.test(label)) {
+                // Confirm an ancestor container mentions another computer/window/tab
+                let cur = btn.parentElement;
+                for (let depth = 0; cur && depth < 6; depth++, cur = cur.parentElement) {
+                    const txt = cur.textContent || '';
+                    if (txt.length < 600 && /another (computer|window|tab|browser)|open (on|in) another/i.test(txt)) {
+                        return btn;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    function detectOtherSession() {
+        return !!findUseHereButton();
+    }
+
+    let localSessionYielded = false;
+    function syncSessionYielded(yielded) {
+        if (yielded === localSessionYielded) return;
+        localSessionYielded = yielded;
+        invoke('set_session_yielded', { yielded: yielded }).catch(function () {});
+        if (!yielded) {
+            const modal = document.getElementById('gm-takeover-modal');
+            if (modal) modal.remove();
+        }
+    }
+
+    window.__GM_SHOW_TAKEOVER_PROMPT = function () {
+        if (document.getElementById('gm-takeover-modal')) return;
+        const useHereBtn = findUseHereButton();
+        if (!useHereBtn) return;
+
+        const overlay = document.createElement('div');
+        overlay.id = 'gm-takeover-modal';
+        overlay.style.cssText =
+            'position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.55);' +
+            'display:flex;align-items:center;justify-content:center;font-family:inherit;';
+
+        const card = document.createElement('div');
+        card.style.cssText =
+            'background:#1e1f20;color:#e3e3e3;border:1px solid #3c4043;border-radius:12px;' +
+            'max-width:380px;width:90%;padding:20px 22px;box-shadow:0 12px 32px rgba(0,0,0,.45);';
+
+        const title = document.createElement('div');
+        title.style.cssText = 'font-size:16px;font-weight:600;margin-bottom:8px;';
+        title.textContent = 'Move Google Messages here?';
+
+        const desc = document.createElement('div');
+        desc.style.cssText = 'font-size:13px;line-height:1.45;color:#9aa0a6;margin-bottom:18px;';
+        desc.textContent =
+            'Google Messages is open on another computer. Move the active session to this app, or choose No to let this app sleep in the background.';
+
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;';
+
+        const noBtn = document.createElement('button');
+        noBtn.type = 'button';
+        noBtn.textContent = 'No, let app sleep';
+        noBtn.style.cssText =
+            'padding:8px 14px;border-radius:18px;border:1px solid #5f6368;background:transparent;' +
+            'color:#e3e3e3;font:inherit;font-size:13px;cursor:pointer;';
+
+        const yesBtn = document.createElement('button');
+        yesBtn.type = 'button';
+        yesBtn.textContent = 'Move session here';
+        yesBtn.style.cssText =
+            'padding:8px 16px;border-radius:18px;border:none;background:#8ab4f8;' +
+            'color:#131314;font:inherit;font-size:13px;font-weight:600;cursor:pointer;';
+
+        noBtn.addEventListener('click', function () {
+            overlay.remove();
+            syncSessionYielded(true);
+        });
+        yesBtn.addEventListener('click', function () {
+            overlay.remove();
+            const btn = findUseHereButton();
+            if (btn) btn.click();
+            syncSessionYielded(false);
+        });
+        overlay.addEventListener('click', function (e) {
+            if (e.target === overlay) {
+                overlay.remove();
+                syncSessionYielded(true);
+            }
+        });
+
+        actions.appendChild(noBtn);
+        actions.appendChild(yesBtn);
+        card.appendChild(title);
+        card.appendChild(desc);
+        card.appendChild(actions);
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+    };
+
+    function checkSessionState() {
+        if (location.host !== 'messages.google.com') return;
+        const other = detectOtherSession();
+        if (other) {
+            syncSessionYielded(true);
+        } else if (localSessionYielded) {
+            const hasMainUi = !!document.querySelector('mws-conversations-list, mw-main-nav, [data-e2e-conversation-list]');
+            if (hasMainUi) {
+                syncSessionYielded(false);
+            }
+        }
+    }
+
+    function observeSessionState() {
+        checkSessionState();
+        const obs = new MutationObserver(checkSessionState);
+        if (document.body) {
+            obs.observe(document.body, { childList: true, subtree: true });
+        }
+    }
+
+    // --- Background Heartbeat & Connection Watchdog ---
+    function isUserBusy() {
+        if (location.pathname.indexOf('/calls') !== -1) return true;
+        if (document.querySelector('button[aria-label*="End call" i], button[aria-label*="Leave call" i], [data-e2e-end-call-button]')) {
+            return true;
+        }
+        const active = document.activeElement;
+        if (active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT' || active.isContentEditable)) {
+            const val = (active.value || active.textContent || '').trim();
+            if (val.length > 0) return true;
+        }
+        const compose = document.querySelector('mw-message-compose textarea, [data-e2e-message-input-box], textarea[placeholder*="message" i]');
+        if (compose && ((compose.value || compose.textContent || '').trim().length > 0)) {
+            return true;
+        }
+        return false;
+    }
+
+    function detectConnectionProblem() {
+        if (navigator.onLine === false) return 'offline';
+        const banners = document.querySelectorAll(
+            'mws-connection-banner, mw-connection-banner, [data-e2e-connection-error], [role="alert"], [role="status"]'
+        );
+        for (let i = 0; i < banners.length; i++) {
+            const el = banners[i];
+            if (!isElementVisible(el)) continue;
+            if (el.closest && el.closest('mws-message-wrapper, mws-conversation-list-item')) continue;
+            const txt = (el.textContent || '').trim();
+            if (txt.length > 0 && txt.length < 240 &&
+                /trying to reach your phone|unable to reach your phone|couldn['’]t connect|no internet|waiting for network|reconnecting/i.test(txt)) {
+                return 'stalled-connection';
+            }
+        }
+        return null;
+    }
+
+    window.__gmHeartbeat = function (wokeFromSleep) {
+        if (location.host !== 'messages.google.com') {
+            invoke('report_heartbeat', { healthy: true, reason: 'non-messages-host' }).catch(function () {});
+            return;
+        }
+        checkSessionState();
+        if (localSessionYielded) {
+            invoke('report_heartbeat', { healthy: true, reason: 'other-session' }).catch(function () {});
+            return;
+        }
+        syncBadge();
+        if (isUserBusy()) {
+            invoke('report_heartbeat', { healthy: true, reason: 'user-busy' }).catch(function () {});
+            return;
+        }
+        const problem = detectConnectionProblem();
+        if (problem) {
+            invoke('report_heartbeat', { healthy: false, reason: problem }).catch(function () {});
+        } else if (wokeFromSleep) {
+            // Prod a lightweight fetch to verify the session socket/network after sleep
+            fetch(location.origin + '/web/', { method: 'HEAD', cache: 'no-store' })
+                .then(function () {
+                    invoke('report_heartbeat', { healthy: true, reason: null }).catch(function () {});
+                })
+                .catch(function () {
+                    invoke('report_heartbeat', { healthy: false, reason: 'wake-fetch-failed' }).catch(function () {});
+                });
+        } else {
+            invoke('report_heartbeat', { healthy: true, reason: null }).catch(function () {});
+        }
+    };
+
+    window.addEventListener('online', function () {
+        if (location.host !== 'messages.google.com') return;
+        setTimeout(function () {
+            if (window.__GM_BACKGROUND_KEEP_ALIVE === false || localSessionYielded || isUserBusy()) return;
+            if (detectConnectionProblem() === 'stalled-connection') {
+                window.location.reload();
+            }
+        }, 6000);
+    });
 })();
 "#;

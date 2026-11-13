@@ -32,6 +32,10 @@ fn main() {
             "open_settings",
             "focus_main_window",
             "adjust_zoom",
+            "send_native_notification",
+            "report_heartbeat",
+            "set_session_yielded",
+            "prompt_takeover_session",
         ]),
     ))
     .expect("failed to run tauri-build");
