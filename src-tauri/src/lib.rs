@@ -209,10 +209,17 @@ fn set_settings(app: tauri::AppHandle, mut settings: Settings) {
     }
 }
 
+#[cfg(windows)]
+const WINDOWS_BROWSER_ARGS: &str =
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+     --disable-background-timer-throttling \
+     --disable-renderer-backgrounding \
+     --disable-backgrounding-occluded-windows";
+
 // Opens the settings window; invoked by the gear button injected into the
 // Messages web UI (the tray menu calls show_settings_window directly).
 #[tauri::command]
-fn open_settings(app: tauri::AppHandle) {
+async fn open_settings(app: tauri::AppHandle) {
     #[cfg(debug_assertions)]
     eprintln!("[ipc] open_settings invoked");
     if let Err(e) = show_settings_window(&app) {
@@ -221,27 +228,42 @@ fn open_settings(app: tauri::AppHandle) {
 }
 
 // Opens the local settings window, or focuses it if already open.
+// Building a new WebView2 window on Windows must happen off the main UI thread
+// (otherwise `webview2_com::wait_with_pump` deadlocks inside WebView2 IPC or
+// menu callbacks) and must pass identical `additional_browser_args` and
+// `scroll_bar_style` to match the shared WebView2 userDataFolder environment.
 fn show_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     } else {
-        let settings = load_settings(app);
-        let explicit_theme = parse_theme(settings.theme.as_deref());
-        #[allow(unused_mut)]
-        let mut builder =
-            WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
-                .title("Settings")
-                .inner_size(500.0, 580.0)
-                .min_inner_size(400.0, 460.0)
-                .theme(explicit_theme)
-                .background_color(theme_bg_color(explicit_theme.unwrap_or(tauri::Theme::Dark)))
-                .center();
-        #[cfg(windows)]
-        {
-            builder = builder.scroll_bar_style(tauri::webview::ScrollBarStyle::FluentOverlay);
-        }
-        let _window = builder.build()?;
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let settings = load_settings(&app);
+            let explicit_theme = parse_theme(settings.theme.as_deref());
+            #[allow(unused_mut)]
+            let mut builder = WebviewWindowBuilder::new(
+                &app,
+                "settings",
+                WebviewUrl::App("settings.html".into()),
+            )
+            .title("Settings")
+            .inner_size(500.0, 580.0)
+            .min_inner_size(400.0, 460.0)
+            .theme(explicit_theme)
+            .background_color(theme_bg_color(explicit_theme.unwrap_or(tauri::Theme::Dark)))
+            .center();
+            #[cfg(windows)]
+            {
+                builder = builder
+                    .scroll_bar_style(tauri::webview::ScrollBarStyle::FluentOverlay)
+                    .additional_browser_args(WINDOWS_BROWSER_ARGS);
+            }
+            if let Err(e) = builder.build() {
+                eprintln!("[show_settings_window] failed to build settings window: {e}");
+            }
+        });
     }
     Ok(())
 }
@@ -330,12 +352,7 @@ pub fn run() {
             {
                 builder = builder
                     .scroll_bar_style(tauri::webview::ScrollBarStyle::FluentOverlay)
-                    .additional_browser_args(
-                        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
-                         --disable-background-timer-throttling \
-                         --disable-renderer-backgrounding \
-                         --disable-backgrounding-occluded-windows",
-                    );
+                    .additional_browser_args(WINDOWS_BROWSER_ARGS);
             }
             let new_win_app = app.handle().clone();
             builder = builder.on_new_window(move |url, _features| {
