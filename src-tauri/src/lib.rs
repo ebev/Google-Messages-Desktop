@@ -227,19 +227,19 @@ fn show_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
         let _ = window.set_focus();
     } else {
         let settings = load_settings(app);
+        let explicit_theme = parse_theme(settings.theme.as_deref());
         #[allow(unused_mut)]
         let mut builder =
             WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
                 .title("Settings")
-                .inner_size(480.0, 540.0)
-                .min_inner_size(360.0, 420.0)
-                .theme(parse_theme(settings.theme.as_deref()))
+                .inner_size(500.0, 580.0)
+                .min_inner_size(400.0, 460.0)
+                .theme(explicit_theme)
+                .background_color(theme_bg_color(explicit_theme.unwrap_or(tauri::Theme::Dark)))
                 .center();
         #[cfg(windows)]
         {
-            builder = builder
-                .scroll_bar_style(tauri::webview::ScrollBarStyle::FluentOverlay)
-                .browser_accelerator_keys(false);
+            builder = builder.scroll_bar_style(tauri::webview::ScrollBarStyle::FluentOverlay);
         }
         let _window = builder.build()?;
     }
@@ -330,7 +330,6 @@ pub fn run() {
             {
                 builder = builder
                     .scroll_bar_style(tauri::webview::ScrollBarStyle::FluentOverlay)
-                    .browser_accelerator_keys(false)
                     .additional_browser_args(
                         "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
                          --disable-background-timer-throttling \
@@ -1365,7 +1364,7 @@ fn apply_window_badge(window: &tauri::WebviewWindow, count: u32) {
     {
         if count > 0 {
             let badge = render_windows_overlay_badge(count);
-            let _ = window.set_overlay_icon(Some(&badge));
+            let _ = window.set_overlay_icon(Some(badge));
         } else {
             let _ = window.set_overlay_icon(None);
         }
@@ -1582,18 +1581,46 @@ const INIT_SCRIPT: &str = r#"
     // SPA re-renders; if it can't be found, fall back to a fixed position
     // near where it normally sits (top-right, left of the avatar).
     const GEAR_BASE_CSS =
-        'width:28px;height:28px;padding:0;border:none;border-radius:50%;' +
-        'background:rgba(128,128,128,.25);color:inherit;font-size:16px;' +
-        'line-height:28px;text-align:center;cursor:pointer;opacity:.6;' +
-        'transition:opacity .15s ease;';
+        'width:34px !important;height:34px !important;min-width:34px !important;min-height:34px !important;' +
+        'padding:0 !important;border:none !important;border-radius:50% !important;' +
+        'background:rgba(128,128,128,.2) !important;color:inherit !important;' +
+        'display:inline-flex !important;align-items:center !important;justify-content:center !important;' +
+        'cursor:pointer !important;opacity:.82;box-sizing:border-box !important;flex-shrink:0 !important;' +
+        'transition:opacity .15s ease,background-color .15s ease;';
     function makeGear() {
         const btn = document.createElement('button');
         btn.id = 'gm-app-settings';
         btn.type = 'button';
         btn.title = 'App settings';
-        btn.textContent = '⚙';
-        btn.addEventListener('mouseenter', function () { btn.style.opacity = '1'; });
-        btn.addEventListener('mouseleave', function () { btn.style.opacity = '.6'; });
+        btn.setAttribute('aria-label', 'App settings');
+
+        const svgNs = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(svgNs, 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('width', '22');
+        svg.setAttribute('height', '22');
+        svg.setAttribute('fill', 'currentColor');
+        svg.setAttribute('aria-hidden', 'true');
+        svg.style.cssText =
+            'width:22px !important;height:22px !important;min-width:22px !important;min-height:22px !important;' +
+            'display:block !important;flex-shrink:0 !important;pointer-events:none !important;';
+
+        const path = document.createElementNS(svgNs, 'path');
+        path.setAttribute(
+            'd',
+            'M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z'
+        );
+        svg.appendChild(path);
+        btn.appendChild(svg);
+
+        btn.addEventListener('mouseenter', function () {
+            btn.style.opacity = '1';
+            btn.style.setProperty('background', 'rgba(128,128,128,.32)', 'important');
+        });
+        btn.addEventListener('mouseleave', function () {
+            btn.style.opacity = '.82';
+            btn.style.setProperty('background', 'rgba(128,128,128,.2)', 'important');
+        });
         btn.addEventListener('click', function (e) {
             e.preventDefault();
             e.stopPropagation();
@@ -1619,12 +1646,12 @@ const INIT_SCRIPT: &str = r#"
         const avatar = findAvatar();
         if (avatar && avatar.parentElement) {
             btn.style.cssText = GEAR_BASE_CSS +
-                'display:inline-block;vertical-align:middle;align-self:center;margin:0 8px;';
+                'vertical-align:middle;align-self:center;margin:0 8px;';
             avatar.parentElement.insertBefore(btn, avatar);
             btn.dataset.anchored = '1';
         } else if (!btn.isConnected) {
             btn.style.cssText = GEAR_BASE_CSS +
-                'position:fixed;top:16px;right:64px;z-index:2147483647;';
+                'position:fixed;top:14px;right:64px;z-index:2147483647;';
             btn.dataset.anchored = '0';
             document.body.appendChild(btn);
         }
@@ -1846,6 +1873,11 @@ const INIT_SCRIPT: &str = r#"
             window.location.reload();
             return;
         }
+        // Suppress browser-only function keys on Windows/Linux (F3 find bar, F7 caret browsing)
+        if (!isMac && (e.key === 'F3' || e.key === 'F7')) {
+            e.preventDefault();
+            return;
+        }
         const mod = isMac ? (e.metaKey && !e.ctrlKey) : (e.ctrlKey && !e.metaKey);
         if (!mod || e.altKey) return;
 
@@ -1881,6 +1913,10 @@ const INIT_SCRIPT: &str = r#"
             } else if ((key === 'r' || key === 'R') && !e.shiftKey) {
                 e.preventDefault();
                 window.location.reload();
+            } else if (/^[pjuosgPJUOSG]$/.test(key)) {
+                // Suppress Edge WebView2 print (Ctrl+P), downloads (Ctrl+J),
+                // view-source (Ctrl+U), open/save file (Ctrl+O/S), find-next (Ctrl+G)
+                e.preventDefault();
             }
         }
     }, true);
