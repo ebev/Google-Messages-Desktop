@@ -1,10 +1,29 @@
 use serde::{Deserialize, Serialize};
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    OnceLock,
+};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_autostart::ManagerExt;
+
+// Tracks the latest unread count so the Dock/taskbar badge can be re-applied
+// whenever the main window transitions back from tray-only (Accessory) mode.
+static LAST_UNREAD_COUNT: AtomicU32 = AtomicU32::new(0);
+// Tracks the last unread count applied to the tray so repeated title mutations
+// with the same count don't re-apply icons/tooltips.
+static LAST_TRAY_COUNT: AtomicU32 = AtomicU32::new(u32::MAX);
+
+// Cached RGBA buffers for the base and badged tray icons to avoid repeated PNG
+// decoding and compositing on every unread count change.
+static BASE_TRAY_ICON: OnceLock<(Vec<u8>, u32, u32)> = OnceLock::new();
+static BADGED_TRAY_ICON: OnceLock<(Vec<u8>, u32, u32)> = OnceLock::new();
+
+// Tracks the main window's zoom percentage (100 = 1.0x, clamped to 50..=250).
+static ZOOM_PERCENT: AtomicU32 = AtomicU32::new(100);
 // Default start URL if the user has not customized it. The canonical web
 // entry point: when already paired this lands straight on the (cached)
 // conversation list; when not paired it redirects to the QR pairing page on
@@ -56,10 +75,48 @@ fn parse_theme(theme: Option<&str>) -> Option<tauri::Theme> {
     }
 }
 
+// Native window background color matching Google Messages' light (#ffffff) and
+// dark (#131314) surfaces so cold starts don't flash white in dark mode.
+fn theme_bg_color(theme: tauri::Theme) -> tauri::window::Color {
+    match theme {
+        tauri::Theme::Dark => tauri::window::Color(19, 19, 20, 255),
+        _ => tauri::window::Color(255, 255, 255, 255),
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
 struct WindowSize {
     width: f64,
     height: f64,
+    x: Option<f64>,
+    y: Option<f64>,
+    maximized: bool,
+}
+
+// Checks whether the saved logical window position (x, y) is still visible on
+// at least one connected monitor (guarding against unplugged external displays).
+fn is_position_on_screen(app: &tauri::AppHandle, x: f64, y: f64, width: f64) -> bool {
+    let Ok(monitors) = app.available_monitors() else {
+        return true;
+    };
+    if monitors.is_empty() {
+        return true;
+    }
+    for m in monitors {
+        let scale = m.scale_factor();
+        let pos = m.position().to_logical::<f64>(scale);
+        let size = m.size().to_logical::<f64>(scale);
+        let mx2 = pos.x + size.width;
+        let my2 = pos.y + size.height;
+        // Require at least 100px of the window's top edge to lie within the monitor.
+        let overlap_x = (x + width).min(mx2) - x.max(pos.x);
+        let in_y = y >= pos.y - 20.0 && y + 60.0 <= my2;
+        if overlap_x >= 100.0 && in_y {
+            return true;
+        }
+    }
+    false
 }
 
 fn settings_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
@@ -114,6 +171,8 @@ fn set_settings(app: tauri::AppHandle, mut settings: Settings) {
     let theme = parse_theme(settings.theme.as_deref());
     for window in app.webview_windows().values() {
         let _ = window.set_theme(theme);
+        let effective = theme.or_else(|| window.theme().ok()).unwrap_or(tauri::Theme::Light);
+        let _ = window.set_background_color(Some(theme_bg_color(effective)));
     }
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.eval(&format!(
@@ -141,7 +200,8 @@ fn show_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
         let _ = window.set_focus();
     } else {
         let settings = load_settings(app);
-        let _window = WebviewWindowBuilder::new(
+        #[allow(unused_mut)]
+        let mut builder = WebviewWindowBuilder::new(
             app,
             "settings",
             WebviewUrl::App("settings.html".into()),
@@ -150,8 +210,14 @@ fn show_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
         .inner_size(480.0, 540.0)
         .min_inner_size(360.0, 420.0)
         .theme(parse_theme(settings.theme.as_deref()))
-        .center()
-        .build()?;
+        .center();
+        #[cfg(windows)]
+        {
+            builder = builder
+                .scroll_bar_style(tauri::webview::ScrollBarStyle::FluentOverlay)
+                .browser_accelerator_keys(false);
+        }
+        let _window = builder.build()?;
     }
     Ok(())
 }
@@ -193,10 +259,10 @@ pub fn run() {
                 .start_url
                 .as_deref()
                 .unwrap_or(DEFAULT_START_URL);
-            // Restore the remembered window size, clamped to the window minimum
-            // in case the persisted file was edited or corrupted.
-            let (width, height) = settings
-                .main_window_size
+            // Restore the remembered window geometry, clamped to the window
+            // minimum in case the persisted file was edited or corrupted.
+            let saved_geom = settings.main_window_size.clone();
+            let (width, height) = saved_geom
                 .as_ref()
                 .map(|s| (s.width.max(400.0), s.height.max(500.0)))
                 .unwrap_or((1100.0, 780.0));
@@ -204,20 +270,68 @@ pub fn run() {
                 "__GM_NOTIFICATIONS_DEFAULT__",
                 if settings.show_notifications { "true" } else { "false" },
             );
+            let explicit_theme = parse_theme(settings.theme.as_deref());
             let mut builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::External(start_url.parse()?))
                     .title("Google Messages")
                     .inner_size(width, height)
                     .min_inner_size(400.0, 500.0)
-                    .theme(parse_theme(settings.theme.as_deref()))
-                    .center()
+                    .theme(explicit_theme)
+                    .background_color(theme_bg_color(
+                        explicit_theme.unwrap_or(tauri::Theme::Dark),
+                    ))
                     .visible(!settings.start_in_tray)
                     .initialization_script_for_all_frames(&init_script);
+            #[cfg(not(target_os = "macos"))]
+            {
+                builder = builder.skip_taskbar(settings.start_in_tray);
+            }
+            #[cfg(windows)]
+            {
+                builder = builder
+                    .scroll_bar_style(tauri::webview::ScrollBarStyle::FluentOverlay)
+                    .browser_accelerator_keys(false);
+            }
+            let new_win_app = app.handle().clone();
+            builder = builder.on_new_window(move |url, _features| {
+                let scheme = url.scheme();
+                if scheme == "https" || scheme == "http" {
+                    if url.host_str() == Some("messages.google.com") {
+                        if let Some(main) = new_win_app.get_webview_window("main") {
+                            let _ = main.navigate(url);
+                        }
+                    } else {
+                        open_external(new_win_app.clone(), url.to_string());
+                    }
+                }
+                tauri::webview::NewWindowResponse::Deny
+            });
+            if let Some(ref geom) = saved_geom {
+                if let (Some(x), Some(y)) = (geom.x, geom.y) {
+                    if is_position_on_screen(app.handle(), x, y, width) {
+                        builder = builder.position(x, y);
+                    } else {
+                        builder = builder.center();
+                    }
+                } else {
+                    builder = builder.center();
+                }
+                if geom.maximized {
+                    builder = builder.maximized(true);
+                }
+            } else {
+                builder = builder.center();
+            }
             if let Some(ua) = USER_AGENT {
                 builder = builder.user_agent(ua);
             }
             #[allow(unused_variables)]
             let window = builder.build()?;
+            if explicit_theme.is_none() {
+                if let Ok(os_theme) = window.theme() {
+                    let _ = window.set_background_color(Some(theme_bg_color(os_theme)));
+                }
+            }
 
             // On Windows & Linux, auto-grant mic/camera so calls don't prompt
             // every session (or fail outright on Linux where media-stream is
@@ -227,6 +341,8 @@ pub fn run() {
             grant_media_permissions(&window);
 
             build_tray(app)?;
+            #[cfg(target_os = "macos")]
+            build_macos_app_menu(app)?;
             #[cfg(target_os = "macos")]
             if settings.start_in_tray {
                 let _ = app
@@ -240,7 +356,6 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
-                    save_main_window_size(window);
                     hide_main_window(window.app_handle());
                     api.prevent_close();
                 }
@@ -251,7 +366,9 @@ pub fn run() {
             open_external,
             get_settings,
             set_settings,
-            open_settings
+            open_settings,
+            focus_main_window,
+            adjust_zoom
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -316,35 +433,236 @@ fn grant_media_permissions(window: &tauri::WebviewWindow) {
     });
 }
 
-// Shows and focuses the main window, restoring the Dock icon on macOS.
+// Shows, unminimizes, and focuses the main window, restoring the Dock/taskbar icon.
 fn show_main_window(app: &tauri::AppHandle) {
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     if let Some(window) = app.get_webview_window("main") {
+        #[cfg(not(target_os = "macos"))]
+        let _ = window.set_skip_taskbar(false);
+        let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+        apply_window_badge(&window, LAST_UNREAD_COUNT.load(Ordering::Relaxed));
     }
 }
 
-// Hides the main window to the tray, removing the Dock icon on macOS.
+// Invoked from JS when a desktop notification is clicked so the main window is
+// unminimized, unhidden from the tray, and brought to the foreground.
+#[tauri::command]
+fn focus_main_window(app: tauri::AppHandle) {
+    #[cfg(debug_assertions)]
+    eprintln!("[ipc] focus_main_window invoked");
+    show_main_window(&app);
+}
+
+// Adjusts the main webview's native zoom factor ("in", "out", or "reset").
+fn apply_zoom_action(app: &tauri::AppHandle, action: &str) {
+    let cur = ZOOM_PERCENT.load(Ordering::Relaxed);
+    let next = match action {
+        "in" => (cur + 10).min(250),
+        "out" => cur.saturating_sub(10).max(50),
+        "reset" => 100,
+        _ => cur,
+    };
+    ZOOM_PERCENT.store(next, Ordering::Relaxed);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_zoom(next as f64 / 100.0);
+    }
+}
+
+#[tauri::command]
+fn adjust_zoom(app: tauri::AppHandle, action: String) {
+    #[cfg(debug_assertions)]
+    eprintln!("[ipc] adjust_zoom({action})");
+    apply_zoom_action(&app, &action);
+}
+
+// Builds the native macOS application menu bar (Google Messages / Edit / View /
+// Window) so standard shortcuts like Cmd+, (Settings), Cmd+R (Reload), and
+// Cmd+=/Cmd+-/Cmd+0 (Zoom) work natively. Windows and Linux omit a top-of-window
+// menu bar strip so the window stays modern and frameless, handling those
+// shortcuts directly via keydown listeners.
+#[cfg(target_os = "macos")]
+fn build_macos_app_menu(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::Submenu;
+
+    let app_settings =
+        MenuItem::with_id(app, "app_settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
+    let app_quit = MenuItem::with_id(
+        app,
+        "app_quit",
+        "Quit Google Messages",
+        true,
+        Some("CmdOrCtrl+Q"),
+    )?;
+    let app_submenu = Submenu::with_items(
+        app,
+        "Google Messages",
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &app_settings,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::show_all(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &app_quit,
+        ],
+    )?;
+
+    let edit_submenu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+
+    let view_reload = MenuItem::with_id(app, "view_reload", "Reload", true, Some("CmdOrCtrl+R"))?;
+    let view_zoom_reset = MenuItem::with_id(
+        app,
+        "view_zoom_reset",
+        "Actual Size",
+        true,
+        Some("CmdOrCtrl+0"),
+    )?;
+    let view_zoom_in =
+        MenuItem::with_id(app, "view_zoom_in", "Zoom In", true, Some("CmdOrCtrl+="))?;
+    let view_zoom_out =
+        MenuItem::with_id(app, "view_zoom_out", "Zoom Out", true, Some("CmdOrCtrl+-"))?;
+    let view_submenu = Submenu::with_items(
+        app,
+        "View",
+        true,
+        &[
+            &view_reload,
+            &PredefinedMenuItem::separator(app)?,
+            &view_zoom_reset,
+            &view_zoom_in,
+            &view_zoom_out,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::fullscreen(app, None)?,
+        ],
+    )?;
+
+    let window_submenu = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
+    )?;
+
+    let menu = Menu::with_items(
+        app,
+        &[&app_submenu, &edit_submenu, &view_submenu, &window_submenu],
+    )?;
+    app.set_menu(menu)?;
+    app.on_menu_event(|app, event| match event.id().as_ref() {
+        "app_settings" => {
+            let _ = show_settings_window(app);
+        }
+        "app_quit" => {
+            if let Some(window) = app.get_webview_window("main") {
+                save_main_window_size(&window.as_ref().window());
+            }
+            app.exit(0);
+        }
+        "view_reload" => {
+            if let Some(window) = app.get_webview_window("main") {
+                if window.is_focused().unwrap_or(false) {
+                    let _ = window.eval("window.location.reload();");
+                }
+            }
+        }
+        action @ ("view_zoom_reset" | "view_zoom_in" | "view_zoom_out") => {
+            if app
+                .get_webview_window("main")
+                .is_some_and(|w| w.is_focused().unwrap_or(false))
+            {
+                let zoom = match action {
+                    "view_zoom_reset" => "reset",
+                    "view_zoom_in" => "in",
+                    _ => "out",
+                };
+                apply_zoom_action(app, zoom);
+            }
+        }
+        _ => {}
+    });
+
+    Ok(())
+}
+
+// Saves geometry and hides the main window to the tray, removing the Dock/taskbar icon.
 fn hide_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        save_main_window_size(&window.as_ref().window());
         let _ = window.hide();
+        #[cfg(not(target_os = "macos"))]
+        let _ = window.set_skip_taskbar(true);
     }
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 }
 
-// Persists the main window's current logical size so it can be restored on
-// the next launch. Called when the window closes to tray and on quit.
+// Persists the main window's current logical size, position, and maximized
+// state so it can be restored on the next launch. Called when the window hides
+// to the tray and on quit.
 fn save_main_window_size(window: &tauri::Window) {
-    if let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) {
-        let logical = size.to_logical::<f64>(scale);
-        let app = window.app_handle();
-        let mut settings = load_settings(app);
+    // Minimized or hidden windows can report bogus positions/sizes (such as
+    // (-32000, -32000) on Windows); preserve the last valid geometry instead.
+    if window.is_minimized().unwrap_or(false) || !window.is_visible().unwrap_or(true) {
+        return;
+    }
+
+    let app = window.app_handle();
+    let mut settings = load_settings(app);
+    let maximized = window.is_maximized().unwrap_or(false);
+
+    if maximized {
+        // Keep the previous unmaximized size/position if we have one so
+        // unmaximizing on a future session restores reasonable bounds.
+        let mut geom = settings.main_window_size.unwrap_or(WindowSize {
+            width: 1100.0,
+            height: 780.0,
+            x: None,
+            y: None,
+            maximized: true,
+        });
+        geom.maximized = true;
+        settings.main_window_size = Some(geom);
+        save_settings(app, &settings);
+    } else if let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) {
+        let logical_size = size.to_logical::<f64>(scale);
+        let (x, y) = window
+            .outer_position()
+            .ok()
+            .map(|p| {
+                let lp = p.to_logical::<f64>(scale);
+                (Some(lp.x), Some(lp.y))
+            })
+            .unwrap_or((None, None));
         settings.main_window_size = Some(WindowSize {
-            width: logical.width,
-            height: logical.height,
+            width: logical_size.width,
+            height: logical_size.height,
+            x,
+            y,
+            maximized: false,
         });
         save_settings(app, &settings);
     }
@@ -374,11 +692,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     //     square here, since template mode only uses the alpha channel.
     //   - Windows/Linux: a colored bubble. Those platforms don't support
     //     template images, so a black icon would be invisible on a dark taskbar.
-    #[cfg(target_os = "macos")]
-    let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
-    #[cfg(not(target_os = "macos"))]
-    let tray_icon =
-        tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon-color.png"))?;
+    let tray_icon = load_base_tray_icon()?;
 
     #[allow(unused_mut)] // `tray` is only reassigned on macOS (template flag)
     let mut tray = TrayIconBuilder::with_id("main")
@@ -446,6 +760,181 @@ fn open_external(app: tauri::AppHandle, url: String) {
     }
 }
 
+// Returns the base (no-unread) tray icon for the current platform.
+fn load_base_tray_icon() -> tauri::Result<tauri::image::Image<'static>> {
+    if let Some((rgba, width, height)) = BASE_TRAY_ICON.get() {
+        return Ok(tauri::image::Image::new_owned(rgba.clone(), *width, *height));
+    }
+    #[cfg(target_os = "macos")]
+    let img = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
+    #[cfg(not(target_os = "macos"))]
+    let img = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon-color.png"))?;
+    let _ = BASE_TRAY_ICON.set((img.rgba().to_vec(), img.width(), img.height()));
+    Ok(img)
+}
+
+// Composites an unread notification dot onto the top-right corner of the tray
+// icon, surrounded by a transparent cutout ring so it separates cleanly from
+// the chat bubble glyph.
+//  - On Windows/Linux, the dot is Google Red (#EA4335).
+//  - On macOS, the dot is opaque black so `icon_as_template(true)` tints it to
+//    match the menu bar alongside the bubble silhouette.
+fn load_badged_tray_icon() -> tauri::Result<tauri::image::Image<'static>> {
+    if let Some((rgba, width, height)) = BADGED_TRAY_ICON.get() {
+        return Ok(tauri::image::Image::new_owned(rgba.clone(), *width, *height));
+    }
+    let base = load_base_tray_icon()?;
+    let width = base.width();
+    let height = base.height();
+    let mut rgba = base.rgba().to_vec();
+
+    let cx = 102.0_f32;
+    let cy = 26.0_f32;
+    let r_inner = 20.0_f32;
+    let r_outer = 26.0_f32;
+
+    #[cfg(target_os = "macos")]
+    let (dot_r, dot_g, dot_b): (u8, u8, u8) = (0, 0, 0);
+    #[cfg(not(target_os = "macos"))]
+    let (dot_r, dot_g, dot_b): (u8, u8, u8) = (234, 67, 53);
+
+    for y in 0..height {
+        for x in 0..width {
+            let dx = x as f32 + 0.5 - cx;
+            let dy = y as f32 + 0.5 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist >= r_outer + 1.0 {
+                continue;
+            }
+            let idx = ((y * width + x) * 4) as usize;
+            // Clear existing glyph pixels inside the outer cutout halo
+            if dist <= r_outer {
+                rgba[idx + 3] = 0;
+            } else {
+                let keep = (dist - r_outer).clamp(0.0, 1.0);
+                rgba[idx + 3] = (rgba[idx + 3] as f32 * keep).round() as u8;
+            }
+            // Draw the solid unread dot inside r_inner
+            if dist < r_inner + 1.0 {
+                let alpha = (r_inner + 0.5 - dist).clamp(0.0, 1.0);
+                let a = (alpha * 255.0).round() as u8;
+                if a > 0 {
+                    rgba[idx] = dot_r;
+                    rgba[idx + 1] = dot_g;
+                    rgba[idx + 2] = dot_b;
+                    rgba[idx + 3] = a;
+                }
+            }
+        }
+    }
+
+    let _ = BADGED_TRAY_ICON.set((rgba.clone(), width, height));
+    Ok(tauri::image::Image::new_owned(rgba, width, height))
+}
+
+// Renders a 32x32 red badge overlay with white bitmap digits ("1".."99", "99+")
+// for the Windows taskbar button (`set_overlay_icon`).
+#[cfg(windows)]
+fn render_windows_overlay_badge(count: u32) -> tauri::image::Image<'static> {
+    const SIZE: u32 = 32;
+    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
+    let cx = 15.5_f32;
+    let cy = 15.5_f32;
+    let radius = 14.5_f32;
+
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist < radius + 0.5 {
+                let alpha = (radius + 0.5 - dist).clamp(0.0, 1.0);
+                let idx = ((y * SIZE + x) * 4) as usize;
+                rgba[idx] = 217; // #D93025
+                rgba[idx + 1] = 48;
+                rgba[idx + 2] = 37;
+                rgba[idx + 3] = (alpha * 255.0).round() as u8;
+            }
+        }
+    }
+
+    // 3x5 pixel font for digits '0'..'9' and '+' (each row is 3 bits, MSB left)
+    fn glyph(ch: char) -> [u8; 5] {
+        match ch {
+            '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+            '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+            '2' => [0b111, 0b001, 0b111, 0b100, 0b111],
+            '3' => [0b111, 0b001, 0b111, 0b001, 0b111],
+            '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+            '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
+            '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
+            '7' => [0b111, 0b001, 0b001, 0b010, 0b010],
+            '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
+            '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
+            '+' => [0b000, 0b010, 0b111, 0b010, 0b000],
+            _ => [0; 5],
+        }
+    }
+
+    let text = if count > 99 {
+        "99+".to_string()
+    } else {
+        count.to_string()
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let scale: u32 = 2;
+    let char_w = 3 * scale;
+    let char_h = 5 * scale;
+    let gap = if chars.len() >= 3 { 1 } else { 2 };
+    let total_w = chars.len() as u32 * char_w + (chars.len().saturating_sub(1) as u32) * gap;
+    let start_x = (SIZE.saturating_sub(total_w)) / 2;
+    let start_y = (SIZE.saturating_sub(char_h)) / 2;
+
+    for (i, ch) in chars.into_iter().enumerate() {
+        let rows = glyph(ch);
+        let ox = start_x + i as u32 * (char_w + gap);
+        for (ry, bits) in rows.iter().enumerate() {
+            for rx in 0..3u32 {
+                if (bits >> (2 - rx)) & 1 == 1 {
+                    for sy in 0..scale {
+                        for sx in 0..scale {
+                            let px = ox + rx * scale + sx;
+                            let py = start_y + ry as u32 * scale + sy;
+                            if px < SIZE && py < SIZE {
+                                let idx = ((py * SIZE + px) * 4) as usize;
+                                rgba[idx] = 255;
+                                rgba[idx + 1] = 255;
+                                rgba[idx + 2] = 255;
+                                rgba[idx + 3] = 255;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    tauri::image::Image::new_owned(rgba, SIZE, SIZE)
+}
+
+// Updates the native taskbar / Dock / launcher unread indicator on the main window.
+fn apply_window_badge(window: &tauri::WebviewWindow, count: u32) {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let badge = if count > 0 { Some(count as i64) } else { None };
+        let _ = window.set_badge_count(badge);
+    }
+    #[cfg(windows)]
+    {
+        if count > 0 {
+            let badge = render_windows_overlay_badge(count);
+            let _ = window.set_overlay_icon(Some(&badge));
+        } else {
+            let _ = window.set_overlay_icon(None);
+        }
+    }
+}
+
 // Called from JS when the unread count changes
 #[tauri::command]
 fn set_tray_badge(app: tauri::AppHandle, count: u32) {
@@ -453,6 +942,16 @@ fn set_tray_badge(app: tauri::AppHandle, count: u32) {
     // dev stderr doubles as proof that IPC from the remote origin works.
     #[cfg(debug_assertions)]
     eprintln!("[ipc] set_tray_badge({count})");
+
+    LAST_UNREAD_COUNT.store(count, Ordering::Relaxed);
+    if LAST_TRAY_COUNT.swap(count, Ordering::Relaxed) == count {
+        return;
+    }
+
+    if let Some(window) = app.get_webview_window("main") {
+        apply_window_badge(&window, count);
+    }
+
     if let Some(tray) = app.tray_by_id("main") {
         if count > 0 {
             let label = if count > 99 {
@@ -462,8 +961,22 @@ fn set_tray_badge(app: tauri::AppHandle, count: u32) {
             };
             // Badge tooltip so the count is visible on hover
             let _ = tray.set_tooltip(Some(&format!("Google Messages ({label} unread)")));
+            if let Ok(icon) = load_badged_tray_icon() {
+                let _ = tray.set_icon(Some(icon));
+                #[cfg(target_os = "macos")]
+                let _ = tray.set_icon_as_template(true);
+            }
+            #[cfg(target_os = "macos")]
+            let _ = tray.set_title(Some(&label));
         } else {
             let _ = tray.set_tooltip(Some("Google Messages"));
+            if let Ok(icon) = load_base_tray_icon() {
+                let _ = tray.set_icon(Some(icon));
+                #[cfg(target_os = "macos")]
+                let _ = tray.set_icon_as_template(true);
+            }
+            #[cfg(target_os = "macos")]
+            let _ = tray.set_title(Some(""));
         }
     }
 }
@@ -569,8 +1082,11 @@ const INIT_SCRIPT: &str = r#"
         return m ? parseInt(m[1], 10) : 0;
     }
 
+    let lastUnreadCount = null;
     function syncBadge() {
         const count = parseUnread(document.title);
+        if (count === lastUnreadCount) return;
+        lastUnreadCount = count;
         invoke('set_tray_badge', { count }).catch(function () {});
     }
 
@@ -642,7 +1158,30 @@ const INIT_SCRIPT: &str = r#"
     // whole body is fine — it keeps the gear alive across SPA re-renders.
     const gearObserver = new MutationObserver(placeGear);
 
+    // --- Desktop UI polish: suppress browser overscroll & ghost-dragging ---
+    function injectDesktopStyles() {
+        if (document.getElementById('gm-desktop-polish')) return;
+        const style = document.createElement('style');
+        style.id = 'gm-desktop-polish';
+        style.textContent =
+            'html, body { overscroll-behavior: none !important; }' +
+            'img, button, [role="tab"], [role="menuitem"] {' +
+            '  -webkit-user-drag: none; user-select: none;' +
+            '}' +
+            'a, [role="button"] {' +
+            '  -webkit-user-drag: none;' +
+            '}';
+        (document.head || document.documentElement).appendChild(style);
+    }
+    document.addEventListener('dragstart', function (e) {
+        const t = e.target;
+        if (t && (t.tagName === 'IMG' || t.tagName === 'A' || (t.closest && t.closest('a, button, [role="button"]')))) {
+            e.preventDefault();
+        }
+    }, true);
+
     function onReady() {
+        injectDesktopStyles();
         observeTitle();
         placeGear();
         gearObserver.observe(document.body, { childList: true, subtree: true });
@@ -653,13 +1192,13 @@ const INIT_SCRIPT: &str = r#"
         onReady();
     }
 
-    // --- Route target="_blank" / window.open links ---
-    // The web app opens links with target="_blank", which the embedded webview
-    // otherwise drops (nothing happens). Handle them ourselves:
+    // --- Route external & target="_blank" / window.open links ---
+    // Handle link navigations so the main window stays on Google Messages:
     //   - messages.google.com (Messages / Calls / Voicemail) -> navigate in the
     //     same window, so they behave like tabs.
-    //   - any other site (e.g. fi.google.com/account) -> open in the OS default
-    //     browser via the open_external command.
+    //   - any other non-auth site (e.g. fi.google.com/account or links inside
+    //     messages) -> open in the OS default browser via open_external, even if
+    //     the anchor omits target="_blank" or sits inside a Shadow DOM.
     function parseUrl(url) {
         try {
             return new URL(url, location.href);
@@ -670,6 +1209,12 @@ const INIT_SCRIPT: &str = r#"
     function openExternal(href) {
         invoke('open_external', { url: href })
             .catch(function (e) { console.error('[gm] open_external failed:', e); });
+    }
+    function isInAppHost(host) {
+        return host === 'messages.google.com' || host === 'accounts.google.com';
+    }
+    function onTrustedOrigin() {
+        return isInAppHost(location.host);
     }
     // Returns true if the link was handled here.
     function route(u) {
@@ -683,47 +1228,218 @@ const INIT_SCRIPT: &str = r#"
         }
         return true;
     }
-    // Capture phase so we beat the app's own click handlers.
-    document.addEventListener('click', function (e) {
-        const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
-        if (a && a.target === '_blank') {
-            const u = parseUrl(a.href);
-            if (u && route(u)) {
+    function findAnchor(e) {
+        if (e.target && e.target.closest) {
+            const direct = e.target.closest('a[href]');
+            if (direct) return direct;
+        }
+        const path = e.composedPath ? e.composedPath() : [];
+        for (let i = 0; i < path.length; i++) {
+            const el = path[i];
+            if (el && el.tagName === 'A' && el.getAttribute && el.getAttribute('href')) {
+                return el;
+            }
+        }
+        return null;
+    }
+    function handleLinkClick(e) {
+        if (!onTrustedOrigin()) return;
+        if (e.type === 'auxclick' && e.button !== 1) return;
+        const a = findAnchor(e);
+        if (!a) return;
+        const rawHref = a.getAttribute('href');
+        if (!rawHref || rawHref.startsWith('#')) {
+            if (e.type === 'auxclick') {
+                e.preventDefault();
+            }
+            return;
+        }
+        const u = parseUrl(a.href);
+        if (!u || (u.protocol !== 'https:' && u.protocol !== 'http:')) return;
+        if (e.type === 'auxclick' && isInAppHost(u.host) && a.target !== '_blank') {
+            e.preventDefault();
+            return;
+        }
+        if (a.target === '_blank' || e.type === 'auxclick' || !isInAppHost(u.host)) {
+            if (route(u)) {
                 e.preventDefault();
                 e.stopPropagation();
             }
         }
-    }, true);
+    }
+    // Capture phase so we beat the app's own click handlers.
+    document.addEventListener('click', handleLinkClick, true);
+    document.addEventListener('auxclick', handleLinkClick, true);
     const origOpen = window.open;
     window.open = function (url) {
-        const u = url ? parseUrl(url) : null;
-        if (u && route(u)) {
-            return null;
+        if (onTrustedOrigin()) {
+            const u = url ? parseUrl(url) : null;
+            if (u && route(u)) {
+                return null;
+            }
         }
         return origOpen.apply(window, arguments);
     };
 
-    // --- Notifications: honor the "Show notifications" app setting ---
+    // --- Cross-platform desktop keyboard shortcuts ---
+    // Uses Cmd on macOS and Ctrl on Windows/Linux:
+    //   Mod + ,        -> Open Settings window
+    //   Mod + N        -> Start a new chat
+    //   Mod + F / K    -> Focus conversation search
+    //   Mod + 1..9     -> Switch to 1st..9th conversation in sidebar
+    //   Mod + = / - / 0 -> Zoom in / out / reset
+    //   Mod + R / F5   -> Reload
+    const isMac = /Mac|iPod|iPhone|iPad/.test(navigator.platform || '');
+    function startNewChat() {
+        const selectors = [
+            'a[href*="/web/conversations/new"]',
+            'mws-fab a',
+            'mws-fab button',
+            '[data-e2e-start-button]',
+            'button[aria-label*="Start chat" i]',
+            'a[aria-label*="Start chat" i]',
+            '.start-chat button',
+            '.fab-label'
+        ];
+        for (let i = 0; i < selectors.length; i++) {
+            const el = document.querySelector(selectors[i]);
+            if (el) {
+                el.click();
+                return true;
+            }
+        }
+        return false;
+    }
+    function focusSearch() {
+        const inputSelectors = [
+            'input[placeholder*="Search" i]',
+            'input[aria-label*="Search" i]',
+            'mws-search-box input',
+            'input[type="search"]'
+        ];
+        for (let i = 0; i < inputSelectors.length; i++) {
+            const inp = document.querySelector(inputSelectors[i]);
+            if (inp && inp.offsetParent !== null) {
+                inp.focus();
+                if (inp.select) inp.select();
+                return true;
+            }
+        }
+        const btnSelectors = [
+            'button[aria-label*="Search" i]',
+            '[data-e2e-search-button]',
+            'mws-search-box button'
+        ];
+        for (let i = 0; i < btnSelectors.length; i++) {
+            const btn = document.querySelector(btnSelectors[i]);
+            if (btn) {
+                btn.click();
+                setTimeout(function () {
+                    for (let j = 0; j < inputSelectors.length; j++) {
+                        const inp = document.querySelector(inputSelectors[j]);
+                        if (inp) {
+                            inp.focus();
+                            if (inp.select) inp.select();
+                            break;
+                        }
+                    }
+                }, 50);
+                return true;
+            }
+        }
+        return false;
+    }
+    function selectConversationByIndex(idx) {
+        let items = document.querySelectorAll(
+            'mws-conversation-list-item a, mws-conversation-list-item [role="listitem"], mws-conversation-list-item'
+        );
+        if (!items || items.length === 0) {
+            items = document.querySelectorAll('a[href*="/web/conversations/"]:not([href$="/new"])');
+        }
+        if (items && items[idx]) {
+            const el = items[idx];
+            const target = el.querySelector ? (el.querySelector('a') || el) : el;
+            target.click();
+            return true;
+        }
+        return false;
+    }
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'F5' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            e.preventDefault();
+            window.location.reload();
+            return;
+        }
+        const mod = isMac ? (e.metaKey && !e.ctrlKey) : (e.ctrlKey && !e.metaKey);
+        if (!mod || e.altKey) return;
+
+        const key = e.key;
+        if ((key === 'n' || key === 'N') && !e.shiftKey) {
+            if (startNewChat()) {
+                e.preventDefault();
+            }
+        } else if ((key === 'f' || key === 'F' || key === 'k' || key === 'K') && !e.shiftKey) {
+            if (focusSearch()) {
+                e.preventDefault();
+            }
+        } else if (!e.shiftKey && key >= '1' && key <= '9') {
+            const idx = key.charCodeAt(0) - 49;
+            if (selectConversationByIndex(idx)) {
+                e.preventDefault();
+            }
+        } else if (!isMac) {
+            // macOS handles Settings, Zoom, and Reload via the native app menu bar;
+            // handling them here as well would fire them twice.
+            if (key === ',' && !e.shiftKey) {
+                e.preventDefault();
+                invoke('open_settings').catch(function () {});
+            } else if (key === '=' || key === '+') {
+                e.preventDefault();
+                invoke('adjust_zoom', { action: 'in' }).catch(function () {});
+            } else if (key === '-' || key === '_') {
+                e.preventDefault();
+                invoke('adjust_zoom', { action: 'out' }).catch(function () {});
+            } else if (key === '0' && !e.shiftKey) {
+                e.preventDefault();
+                invoke('adjust_zoom', { action: 'reset' }).catch(function () {});
+            } else if ((key === 'r' || key === 'R') && !e.shiftKey) {
+                e.preventDefault();
+                window.location.reload();
+            }
+        }
+    }, true);
+
+    // --- Notifications: honor the "Show notifications" app setting & focus on click ---
     // The flag is seeded from settings.json at injection time and updated live
     // by set_settings. When off, hand back an inert stand-in so the page's own
-    // notification code keeps working without anything being shown.
+    // notification code keeps working without anything being shown. When on,
+    // clicking a notification restores and focuses the native window even if it
+    // was minimized or hidden to the system tray.
+    function focusAppWindow() {
+        invoke('focus_main_window').catch(function () {});
+    }
+
     window.__GM_SHOW_NOTIFICATIONS = __GM_NOTIFICATIONS_DEFAULT__;
     const OrigNotification = window.Notification;
-    function GMNotification(title, options) {
-        if (window.__GM_SHOW_NOTIFICATIONS === false) {
-            return {
-                close: function () {},
-                addEventListener: function () {},
-                removeEventListener: function () {},
-                dispatchEvent: function () { return false; }
-            };
+    if (OrigNotification) {
+        function GMNotification(title, options) {
+            if (window.__GM_SHOW_NOTIFICATIONS === false) {
+                return {
+                    close: function () {},
+                    addEventListener: function () {},
+                    removeEventListener: function () {},
+                    dispatchEvent: function () { return false; }
+                };
+            }
+            const notif = new OrigNotification(title, options);
+            notif.addEventListener('click', focusAppWindow);
+            return notif;
         }
-        return new OrigNotification(title, options);
+        GMNotification.requestPermission = OrigNotification.requestPermission.bind(OrigNotification);
+        Object.defineProperty(GMNotification, 'permission', {
+            get: function () { return OrigNotification.permission; }
+        });
+        window.Notification = GMNotification;
     }
-    GMNotification.requestPermission = OrigNotification.requestPermission.bind(OrigNotification);
-    Object.defineProperty(GMNotification, 'permission', {
-        get: function () { return OrigNotification.permission; }
-    });
-    window.Notification = GMNotification;
 })();
 "#;

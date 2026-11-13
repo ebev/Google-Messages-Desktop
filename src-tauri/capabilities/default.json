@@ -4,7 +4,10 @@
   "description": "Default capabilities for Google Messages",
   "windows": ["main", "settings"],
   "remote": {
-    "urls": ["https://messages.google.com/*"]
+    "urls": [
+      "https://messages.google.com/*",
+      "https://accounts.google.com/*"
+    ]
   },
   "permissions": [
     "core:default",
@@ -18,6 +21,8 @@
     "allow-open-external",
     "allow-get-settings",
     "allow-set-settings",
-    "allow-open-settings"
+    "allow-open-settings",
+    "allow-focus-main-window",
+    "allow-adjust-zoom"
   ]
 }

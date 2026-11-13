@@ -8,14 +8,24 @@ bundling Chromium, so the app stays small.
 
 - Native window wrapping `messages.google.com`
 - System tray icon — left-click toggles the window, right-click for the menu
-- Settings window (tray menu → **Settings…**, or the floating gear in the app):
-  **Launch at Login**, **Start in Tray**, notifications toggle, theme override
-  (System / Light / Dark), and a custom start URL
-- Closes to tray instead of quitting (hiding the macOS Dock icon while in the
-  tray); single-instance enforced; window size remembered across launches
-- System notifications, even when the window is hidden
-- Follows the system light/dark theme (or force light/dark in Settings)
-- Unread-count surfaced via the tray tooltip
+- Settings window (tray menu → **Settings…**, `Ctrl+,` / `Cmd+,`, or the
+  floating gear in the app): **Launch at Login**, **Start in Tray**,
+  notifications toggle, theme override (System / Light / Dark), and a custom
+  start URL
+- Closes to tray instead of quitting (hiding the macOS Dock icon and
+  Windows/Linux taskbar presence while in the tray); single-instance enforced;
+  window size, position, and maximized state remembered across launches
+- System notifications, even when the window is hidden — clicking a
+  notification unminimizes, unhides, and focuses the main window
+- Follows the system light/dark theme (or force light/dark in Settings) with a
+  theme-matched cold-start background to prevent white flashes
+- Unread count surfaced via a native Windows taskbar overlay badge, macOS
+  Dock / Linux launcher badge, system tray unread indicator dot, and tray
+  tooltip
+- Desktop keyboard shortcuts (`Ctrl` on Windows/Linux, `Cmd` on macOS):
+  `Mod+,` (Settings), `Mod+N` (new chat), `Mod+F` / `Mod+K` (search),
+  `Mod+1`–`9` (jump to conversation), `Mod+=` / `Mod+-` / `Mod+0` (zoom), and
+  `Mod+R` / `F5` (reload)
 - Google Fi **Calls** / **Voicemail** tabs work in-window (handled around their
   `target="_blank"` links), with a Safari user-agent so they aren't rejected as
   an unsupported browser

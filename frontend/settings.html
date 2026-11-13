@@ -281,11 +281,29 @@
         }
       }
 
-      saveBtn.addEventListener('click', save);
-      closeBtn.addEventListener('click', () => {
+      function closeWindow() {
         invoke('plugin:window|close', { label: 'settings' }).catch((e) => {
           console.error('Failed to close window:', e);
         });
+      }
+
+      saveBtn.addEventListener('click', save);
+      closeBtn.addEventListener('click', closeWindow);
+
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeWindow();
+        } else if (e.key === 'Enter' && e.target && e.target.tagName === 'INPUT') {
+          e.preventDefault();
+          save();
+        } else if ((e.metaKey || e.ctrlKey) && (e.key === 'w' || e.key === 'W')) {
+          e.preventDefault();
+          closeWindow();
+        } else if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
+          e.preventDefault();
+          save();
+        }
       });
 
       load();

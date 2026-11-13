@@ -345,6 +345,18 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the adjust_zoom command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-adjust-zoom",
+          "markdownDescription": "Enables the adjust_zoom command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the focus_main_window command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-focus-main-window",
+          "markdownDescription": "Enables the focus_main_window command without any pre-configured scope."
+        },
+        {
           "description": "Enables the get_settings command without any pre-configured scope.",
           "type": "string",
           "const": "allow-get-settings",
@@ -373,6 +385,18 @@
           "type": "string",
           "const": "allow-set-tray-badge",
           "markdownDescription": "Enables the set_tray_badge command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the adjust_zoom command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-adjust-zoom",
+          "markdownDescription": "Denies the adjust_zoom command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the focus_main_window command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-focus-main-window",
+          "markdownDescription": "Denies the focus_main_window command without any pre-configured scope."
         },
         {
           "description": "Denies the get_settings command without any pre-configured scope.",

@@ -5,6 +5,48 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-10-26
+
+### Added
+- **Unread badges across Taskbar, Dock, and System Tray:**
+  - **Windows:** renders a 32×32 red taskbar overlay icon (`set_overlay_icon`)
+    with white bitmap digits (`1`–`99`, `99+`) when unread messages exist.
+  - **macOS & Linux:** sets the native numeric Dock / launcher badge
+    (`set_badge_count`), re-applying the cached unread count when restoring the
+    window from tray-only (`Accessory`) mode.
+  - **System Tray (all OSes):** dynamically composites a top-right unread dot
+    with a cutout halo onto the tray icon (`#EA4335` red on Windows/Linux;
+    template silhouette + menu-bar count title on macOS).
+- **Click notification to restore & focus:** clicking a desktop notification
+  unminimizes, unhides from the tray, and focuses the main window via a new
+  `focus_main_window` command.
+- **Full window state persistence & cold-start polish:**
+  - Persists window `(x, y)` position and `maximized` state alongside
+    `(width, height)`, validating on startup that the saved position still
+    overlaps an active monitor before restoring.
+  - Sets `skip_taskbar(true/false)` on Windows and Linux when hiding/showing to
+    the tray.
+  - Sets a theme-matched native window background color (`#131314` dark /
+    `#ffffff` light) to prevent a white flash while `messages.google.com` loads.
+- **Windows WebView2 & cross-platform web-feel cleanup:**
+  - Enables Windows 11 `ScrollBarStyle::FluentOverlay` and disables Edge browser
+    accelerator keys (`browser_accelerator_keys(false)` to suppress `Ctrl+P`,
+    `F3`, `F7`, and `Ctrl+J`).
+  - Adds a native `.on_new_window()` handler across all frames and upgrades the
+    JS link router to pierce Shadow DOM, handle middle-clicks (`auxclick`), and
+    route external non-Google links to the OS browser even without
+    `target="_blank"`.
+  - Disables viewport rubber-band overscroll (`overscroll-behavior: none`) and
+    ghost-dragging of UI links, buttons, and images.
+- **Cross-platform keyboard shortcuts (`Ctrl` on Windows/Linux, `Cmd` on macOS):**
+  - `Mod+,` opens Settings; `Mod+N` starts a new chat; `Mod+F` / `Mod+K`
+    focuses conversation search; `Mod+1`–`9` switches to the 1st–9th
+    conversation; `Mod+=` / `Mod+-` / `Mod+0` adjusts native WebView zoom
+    (`50%`–`250%`); `Mod+R` / `F5` reloads; `Esc` / `Mod+W` closes Settings and
+    `Enter` / `Mod+S` saves Settings.
+  - Adds a native macOS Application Menu bar (**Google Messages / Edit / View /
+    Window**) while keeping Windows and Linux free of a classic Win32 menu bar.
+
 ## [1.1.0] - 2026-10-24
 
 ### Added

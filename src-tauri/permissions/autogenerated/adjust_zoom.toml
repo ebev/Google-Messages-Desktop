@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-adjust-zoom"
+description = "Enables the adjust_zoom command without any pre-configured scope."
+commands.allow = ["adjust_zoom"]
+
+[[permission]]
+identifier = "deny-adjust-zoom"
+description = "Denies the adjust_zoom command without any pre-configured scope."
+commands.deny = ["adjust_zoom"]
