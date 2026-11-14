@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Google Messages",
-  "version": "1.3.1",
   "identifier": "com.googleMessages.app",
   "build": {
     "frontendDist": "../frontend"

@@ -235,8 +235,7 @@
         notifClosedByAppSinceIncrease = false;
     }
 
-    function computeEffectiveUnread(domInfo) {
-        const titleCount = parseUnread(document.title);
+    function computeEffectiveUnread(titleCount, domInfo) {
         if (titleCount === 0) {
             resetUnreadTracking();
             return 0;
@@ -350,8 +349,11 @@
     }
 
     function syncBadge() {
-        const domInfo = inspectDomConversations();
-        const count = computeEffectiveUnread(domInfo);
+        // The sidebar scan is the expensive part and is only needed while the
+        // title reports unread messages, so skip it in the common idle case.
+        const titleCount = parseUnread(document.title);
+        const domInfo = titleCount > 0 ? inspectDomConversations() : null;
+        const count = computeEffectiveUnread(titleCount, domInfo);
 
         const changed = count !== lastUnreadCount;
 
@@ -783,7 +785,7 @@
         if (typeof stub.onclick === 'function') {
             try { stub.onclick(evt); } catch (_) {}
         }
-        stub.dispatchEvent({ type: 'click' });
+        stub.dispatchEvent(evt || { type: 'click' });
     }
 
     // Called from Rust (macOS / Linux) when a native notification is clicked.
@@ -800,8 +802,8 @@
         const effKind = kind || 'message';
         const tag = opts.tag
             ? String(opts.tag)
-            : (effKind === 'takeover' ? 'gm-session-takeover' : ('gm-conv-' + normTitle));
-        const id = tag || ('gm-notif-' + (nextNotifSeq++));
+            : (effKind === 'takeover' ? 'gm-takeover' : ('gm-conv-' + normTitle));
+        const id = tag;
 
         if (window.__GM_SHOW_NOTIFICATIONS === false) {
             return createNotificationStub(null, tag, normTitle, normBody);
@@ -1163,9 +1165,20 @@
 
     // --- Startup wiring ---
     // Single body observer for the cheap per-mutation checks.
+    // placeGear is cheap enough to run on every mutation. The session check
+    // scans every button and reads layout, so it runs at most once per
+    // SESSION_CHECK_DELAY_MS, after the burst of mutations settles.
+    function scheduleSessionCheck() {
+        if (sessionCheckTimer) return;
+        sessionCheckTimer = setTimeout(function () {
+            sessionCheckTimer = null;
+            checkSessionState();
+        }, SESSION_CHECK_DELAY_MS);
+    }
+
     function onBodyMutation() {
         placeGear();
-        checkSessionState();
+        scheduleSessionCheck();
     }
 
     function onReady() {
@@ -1241,7 +1254,6 @@
     let lastWebNotifAt = 0;
     let pendingFallbackTimer = null;
     let badgeSyncTimer = null;
-    let nextNotifSeq = 1;
     const activeNotifications = new Map();
     // How long a new notification is exempt from read-conversation pruning.
     const PRUNE_GRACE_MS = 5000;
@@ -1252,6 +1264,8 @@
 
     // Session-takeover tracking
     let localSessionYielded = false;
+    let sessionCheckTimer = null;
+    const SESSION_CHECK_DELAY_MS = 150;
 
     // Observers
     let observedTitleEl = null;

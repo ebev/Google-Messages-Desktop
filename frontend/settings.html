@@ -502,6 +502,16 @@
         els.startUrl.value = values.start_url || '';
       }
 
+      // The version comes from the app itself, so it never needs editing here.
+      async function showVersion() {
+        try {
+          els.appVersion.textContent = 'v' + (await invoke('plugin:app|version'));
+          els.appVersion.hidden = false;
+        } catch (e) {
+          console.error('Failed to read app version:', e);
+        }
+      }
+
       async function load() {
         try {
           applyForm(await invoke('get_settings'));
@@ -546,7 +556,7 @@
       }
 
       function init() {
-        ['status', 'startUrl', 'resetUrlBtn', 'saveBtn', 'closeBtn'].concat(TOGGLES.map((t) => t[0])).forEach((id) => {
+        ['status', 'appVersion', 'startUrl', 'resetUrlBtn', 'saveBtn', 'closeBtn'].concat(TOGGLES.map((t) => t[0])).forEach((id) => {
           els[id] = document.getElementById(id);
         });
         els.themeButtons = document.querySelectorAll('.seg-btn[data-theme-val]');
@@ -582,6 +592,7 @@
         document.addEventListener('keydown', handleKeydown);
 
         load();
+        showVersion();
       }
 
       // --- State ---
@@ -589,7 +600,7 @@
       const TOGGLES = [
         ['launchAtLogin', 'launch_at_login', false],
         ['startInTray', 'start_in_tray', false],
-        ['showNotifications', 'show_notifications', false],
+        ['showNotifications', 'show_notifications', true],
         ['backgroundKeepAlive', 'background_keep_alive', true],
       ];
       const root = document.documentElement;
@@ -616,7 +627,7 @@
           <div class="app-name">Google Messages</div>
           <div class="app-sub">Desktop wrapper &amp; background listener</div>
         </div>
-        <span class="app-badge">v1.3.1</span>
+        <span id="appVersion" class="app-badge" hidden></span>
       </div>
 
       <!-- Appearance -->

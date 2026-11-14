@@ -108,8 +108,6 @@ static BACKGROUND_KEEP_ALIVE: AtomicBool = AtomicBool::new(true);
 // user hasn't switched the session back here; while true, background keep-alive
 // and auto-refresh are paused so the OS can sleep the app normally.
 static SESSION_YIELDED: AtomicBool = AtomicBool::new(false);
-// Ensures we only pop one notification per transition into the yielded state.
-static TAKEOVER_NOTIFIED: AtomicBool = AtomicBool::new(false);
 // Watchdog counters for the background heartbeat loop.
 static PENDING_HEARTBEAT_PINGS: AtomicU32 = AtomicU32::new(0);
 static UNHEALTHY_STREAK: AtomicU32 = AtomicU32::new(0);
@@ -1111,21 +1109,12 @@ fn build_macos_app_menu(app: &tauri::App) -> tauri::Result<()> {
     app.on_menu_event(|app, event| match event.id().as_ref() {
         "app_settings" => show_settings_window(app),
         "app_quit" => quit_app(app),
-        "view_reload" => {
-            if is_main_focused(app) {
-                eval_in_main(app, "window.location.reload();");
-            }
+        "view_reload" if is_main_focused(app) => {
+            eval_in_main(app, "window.location.reload();");
         }
-        action @ ("view_zoom_reset" | "view_zoom_in" | "view_zoom_out") => {
-            if is_main_focused(app) {
-                let zoom = match action {
-                    "view_zoom_reset" => "reset",
-                    "view_zoom_in" => "in",
-                    _ => "out",
-                };
-                apply_zoom_action(app, zoom);
-            }
-        }
+        "view_zoom_reset" if is_main_focused(app) => apply_zoom_action(app, "reset"),
+        "view_zoom_in" if is_main_focused(app) => apply_zoom_action(app, "in"),
+        "view_zoom_out" if is_main_focused(app) => apply_zoom_action(app, "out"),
         _ => {}
     });
 
@@ -1281,7 +1270,8 @@ fn set_session_yielded(app: tauri::AppHandle, yielded: bool) {
 
     if yielded {
         reset_watchdog_counters();
-        if !was_yielded && !TAKEOVER_NOTIFIED.swap(true, Ordering::Relaxed) {
+        // Only on the transition into the yielded state, so it pops once.
+        if !was_yielded {
             let main_focused = main_window(&app).is_some_and(|w| {
                 w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false)
             });
@@ -1297,7 +1287,6 @@ fn set_session_yielded(app: tauri::AppHandle, yielded: bool) {
             }
         }
     } else {
-        TAKEOVER_NOTIFIED.store(false, Ordering::Relaxed);
         close_os_notification(&app, TAKEOVER_NOTIFICATION_ID);
     }
 }
@@ -1305,17 +1294,16 @@ fn set_session_yielded(app: tauri::AppHandle, yielded: bool) {
 #[tauri::command]
 fn send_native_notification(
     app: tauri::AppHandle,
-    id: Option<String>,
+    id: String,
     title: String,
     body: String,
     kind: String,
 ) {
-    ipc_log!("send_native_notification(id={id:?}, kind={kind}, title={title})");
+    ipc_log!("send_native_notification(id={id}, kind={kind}, title={title})");
     if !SHOW_NOTIFICATIONS.load(Ordering::Relaxed) {
         return;
     }
-    let notif_id = id.unwrap_or_else(|| "gm-msg-default".to_string());
-    send_os_notification(&app, notif_id, title, body, kind == "takeover");
+    send_os_notification(&app, id, title, body, kind == "takeover");
 }
 
 #[tauri::command]
@@ -1567,9 +1555,6 @@ mod macos_native {
         NSUserNotificationCenterDelegate, NSUserNotificationDefaultSoundName,
     };
     use std::cell::RefCell;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static NOTIF_SEQ: AtomicU32 = AtomicU32::new(1);
 
     struct GmNotificationDelegateIvars {
         app: tauri::AppHandle,
@@ -1692,17 +1677,9 @@ mod macos_native {
             #[allow(deprecated)]
             {
                 let center = NSUserNotificationCenter::defaultUserNotificationCenter();
-                let seq = NOTIF_SEQ.fetch_add(1, Ordering::Relaxed);
-                let eff_id = if !id.is_empty() {
-                    id
-                } else if is_takeover {
-                    format!("gm-takeover-{seq}")
-                } else {
-                    format!("gm-msg-{seq}")
-                };
 
                 DELIVERED_NOTIFS.with(|slot| {
-                    if let Some(prev) = slot.borrow_mut().remove(&eff_id) {
+                    if let Some(prev) = slot.borrow_mut().remove(&id) {
                         center.removeDeliveredNotification(&prev);
                     }
                 });
@@ -1712,7 +1689,7 @@ mod macos_native {
                 if !body.is_empty() {
                     notif.setInformativeText(Some(&NSString::from_str(&body)));
                 }
-                notif.setIdentifier(Some(&NSString::from_str(&eff_id)));
+                notif.setIdentifier(Some(&NSString::from_str(&id)));
                 unsafe {
                     notif.setSoundName(Some(NSUserNotificationDefaultSoundName));
                 }
@@ -1723,7 +1700,7 @@ mod macos_native {
                 }
                 center.deliverNotification(&notif);
                 DELIVERED_NOTIFS.with(|slot| {
-                    slot.borrow_mut().insert(eff_id, notif);
+                    slot.borrow_mut().insert(id, notif);
                 });
             }
         });
@@ -1768,5 +1745,151 @@ mod macos_native {
                 }
             }
         });
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    // Returns the text between the first `open` and the next `close` after it.
+    fn between<'a>(text: &'a str, open: &str, close: &str) -> &'a str {
+        let start = text.find(open).expect("opening marker not found") + open.len();
+        let len = text[start..].find(close).expect("closing marker not found");
+        &text[start..start + len]
+    }
+
+    // Commands registered with the invoke handler in `run`.
+    fn handler_commands() -> BTreeSet<String> {
+        // Built with concat! so this test's own source does not match first.
+        let marker = concat!("generate_handler", "![");
+        between(include_str!("lib.rs"), marker, "]")
+            .split(',')
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    // Commands declared in the ACL manifest by build.rs.
+    fn manifest_commands() -> BTreeSet<String> {
+        between(include_str!("../build.rs"), ".commands(&[", "])")
+            .split(',')
+            .map(|name| name.trim().trim_matches('"').to_string())
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    // Commands allowed by capabilities/default.json ("allow-foo-bar" -> "foo_bar").
+    fn capability_commands() -> BTreeSet<String> {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json"))
+                .expect("capabilities/default.json is valid JSON");
+        capability["permissions"]
+            .as_array()
+            .expect("permissions is an array")
+            .iter()
+            .filter_map(|permission| permission.as_str()?.strip_prefix("allow-"))
+            .map(|name| name.replace('-', "_"))
+            .collect()
+    }
+
+    // A command has to be listed in three places to be callable from the page.
+    // This fails as soon as one of them is missed.
+    #[test]
+    fn command_lists_agree() {
+        let handler = handler_commands();
+        assert!(
+            !handler.is_empty(),
+            "no commands found in generate_handler!"
+        );
+        assert_eq!(
+            handler,
+            manifest_commands(),
+            "generate_handler! in lib.rs and .commands(..) in build.rs differ"
+        );
+        assert_eq!(
+            handler,
+            capability_commands(),
+            "generate_handler! in lib.rs and capabilities/default.json differ"
+        );
+    }
+
+    // The settings placeholders are substituted by plain string replacement,
+    // so each must appear exactly once in the injected script.
+    #[test]
+    fn init_script_has_each_placeholder_once() {
+        for token in ["__GM_NOTIFICATIONS_DEFAULT__", "__GM_KEEP_ALIVE_DEFAULT__"] {
+            assert_eq!(INIT_SCRIPT.matches(token).count(), 1, "{token}");
+        }
+    }
+
+    #[test]
+    fn unread_label_caps_at_99() {
+        assert_eq!(unread_label(1), "1");
+        assert_eq!(unread_label(99), "99");
+        assert_eq!(unread_label(100), "99+");
+    }
+
+    #[test]
+    fn parse_theme_only_accepts_explicit_light_or_dark() {
+        assert_eq!(parse_theme(Some("light")), Some(tauri::Theme::Light));
+        assert_eq!(parse_theme(Some("dark")), Some(tauri::Theme::Dark));
+        assert_eq!(parse_theme(Some("system")), None);
+        assert_eq!(parse_theme(None), None);
+    }
+
+    #[test]
+    fn parse_start_url_accepts_only_http_and_https() {
+        assert!(parse_start_url(DEFAULT_START_URL).is_some());
+        assert!(parse_start_url("  http://example.com/x  ").is_some());
+        assert!(parse_start_url("ftp://example.com").is_none());
+        assert!(parse_start_url("javascript:alert(1)").is_none());
+        assert!(parse_start_url("not a url").is_none());
+        assert!(parse_start_url("").is_none());
+    }
+
+    // settings.json files written by older versions lack the newer fields.
+    #[test]
+    fn settings_from_older_versions_get_defaults() {
+        let settings: Settings = serde_json::from_str(r#"{"start_in_tray": true}"#).unwrap();
+        assert!(settings.start_in_tray);
+        assert!(settings.show_notifications);
+        assert!(settings.background_keep_alive);
+        assert!(settings.start_url.is_none());
+        assert!(settings.main_window_size.is_none());
+    }
+
+    #[test]
+    fn settings_round_trip_keeps_window_geometry() {
+        let settings = Settings {
+            main_window_size: Some(WindowSize {
+                width: 900.0,
+                height: 700.0,
+                x: Some(10.0),
+                y: None,
+                maximized: true,
+            }),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let geometry = serde_json::from_str::<Settings>(&json)
+            .unwrap()
+            .main_window_size
+            .unwrap();
+        assert_eq!((geometry.width, geometry.height), (900.0, 700.0));
+        assert_eq!((geometry.x, geometry.y), (Some(10.0), None));
+        assert!(geometry.maximized);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn takeover_notification_ids_are_recognized() {
+        assert!(is_takeover_notification(TAKEOVER_NOTIFICATION_ID));
+        assert!(!is_takeover_notification("gm-conv-Alice"));
     }
 }

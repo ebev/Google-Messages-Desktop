@@ -38,7 +38,7 @@
 - [x] **Eliminate Dark-Mode White Flash on Cold Start:** Set the native window `.background_color()` before loading `messages.google.com` (`#131314` for Dark, `#ffffff` for Light) so WebView2/WebKit doesn't flash white while initializing.
 
 ### Batch 4: Windows WebView2 & Cross-Platform "Web-Feel" Cleanup — DONE
-- [x] **Windows WebView2 Polish:** Enable Windows 11 `ScrollBarStyle::FluentOverlay` and disable browser-only accelerator keys (`browser_accelerator_keys(false)` to suppress Edge `Ctrl+P` print, `F3` find bar, `F7` caret browsing prompt, `Ctrl+J` downloads popup).
+- [x] **Windows WebView2 Polish:** Enable Windows 11 `ScrollBarStyle::FluentOverlay` and suppress browser-only accelerator keys with the injected `keydown` handler in `init_script.js` (Edge `Ctrl+P` print, `F3` find bar, `F7` caret browsing prompt, `Ctrl+J` downloads popup). `browser_accelerator_keys(false)` is not used.
 - [x] **Native New-Window & Link Guard (`on_new_window` + Shadow-DOM link routing):** Intercept native new-window requests across all frames (including cross-origin iframes) and route non-Messages links (including links without `target="_blank"` or middle-clicks) to the OS default browser.
 - [x] **CSS / DOM Web-Feel Cleanup:** Inject styles/handlers in `INIT_SCRIPT` to disable viewport rubber-band overscroll (`overscroll-behavior: none`) and prevent ghost-dragging of UI images/links.
 
