@@ -1165,7 +1165,7 @@ fn grant_media_permissions(window: &tauri::WebviewWindow) {
 // user-media permission requests so voice/video calls work on Linux.
 #[cfg(target_os = "linux")]
 fn grant_media_permissions(window: &tauri::WebviewWindow) {
-    use webkit2gtk::glib::Cast;
+    use webkit2gtk::glib::ObjectExt;
     use webkit2gtk::{PermissionRequestExt, SettingsExt, UserMediaPermissionRequest, WebViewExt};
 
     let _ = window.with_webview(|webview| {
