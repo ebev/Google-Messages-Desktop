@@ -152,6 +152,14 @@ jobs:
 
           for f in "${artifacts[@]}"; do
             name=$(basename "$f")
+            # Re-upload safety: delete any existing asset with the same name,
+            # so a re-run or re-tag replaces packages instead of stacking
+            # duplicates (the query param alone does not dedupe).
+            del_ids=$(curl -sS -H "$auth" "$API/releases/$id/assets" | python3 -c "import json,sys; asset_name=sys.argv[1]; print('\\n'.join(str(a['id']) for a in json.load(sys.stdin) if a.get('name')==asset_name))" "$name")
+            for aid in $del_ids; do
+              code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H "$auth" "$API/releases/$id/assets/$aid")
+              echo "Deleted stale asset id $aid (HTTP $code)"
+            done
             # Bundle names contain a space ("Google Messages_..."); encode it
             # for the query string.
             code=$(curl -sS -o "$resp" -w '%{http_code}' -X POST -H "$auth" \
