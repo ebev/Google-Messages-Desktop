@@ -1,0 +1,164 @@
+name: release-packages
+
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release-${{ gitea.ref }}
+  cancel-in-progress: false
+
+jobs:
+  packages:
+    name: Packages (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            targets: deb,rpm
+          - os: windows-cross-latest
+            targets: nsis
+          - os: macos-latest
+            targets: dmg
+    steps:
+      - uses: actions/checkout@v4
+      # The tag must name the version being built: v1.4.0 and v1.4.0-TEST1
+      # both match a 1.4.0 tree, v1.5.0 does not.
+      - name: Check tag matches Cargo.toml version
+        shell: bash
+        env:
+          REF: ${{ gitea.ref }}
+        run: |
+          crate_version=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)
+          tag="${REF#refs/tags/}"
+          tag_version="${tag#v}"
+          tag_version="${tag_version%%-*}"
+          if [ -z "$crate_version" ] || [ "$tag_version" != "$crate_version" ]; then
+            echo "Version mismatch: ref=$REF tag=$tag tag version=$tag_version Cargo.toml version=$crate_version"
+            exit 1
+          fi
+          echo "Tag $tag matches Cargo.toml version $crate_version"
+      - run: npm ci
+      # Same packages as scripts/setup-dev.sh installs on apt-based distros.
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          workspaces: src-tauri
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.os != 'macos-latest'
+      - name: Build (Linux deb/rpm)
+        if: matrix.os == 'ubuntu-latest'
+        run: npm run tauri build -- -b deb,rpm
+      # windows-cross-latest is a Linux container: cargo-xwin links against the
+      # MSVC SDK and makensis builds the installer, so no Windows host is needed.
+      - name: Build (Windows cross, nsis)
+        if: matrix.os == 'windows-cross-latest'
+        run: npm run tauri build -- -b nsis --runner cargo-xwin --target x86_64-pc-windows-msvc
+      # Ad-hoc signed (signingIdentity "-" in tauri.conf.json), not notarized.
+      - name: Build (macOS dmg)
+        if: matrix.os == 'macos-latest'
+        run: npm run tauri build -- -b dmg
+      # Every leg uploads to the same release. The first leg to arrive creates
+      # it (GET by tag, POST on 404); a leg that loses that race gets 409 and
+      # re-reads the release the other leg created.
+      - name: Verify and upload to release
+        shell: bash
+        env:
+          OS: ${{ matrix.os }}
+          REF: ${{ gitea.ref }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API: https://gitea.eabev.com/api/v1/repos/eric/Google-Messages
+        run: |
+          set -euo pipefail
+          tag="${REF#refs/tags/}"
+          bundle=src-tauri/target/release/bundle
+          xbundle=src-tauri/target/x86_64-pc-windows-msvc/release
+
+          artifacts=()
+          need() {
+            # need <description> <dir> <find -name pattern>
+            local found
+            found=$(find "$2" -maxdepth 1 -type f -name "$3" 2>/dev/null || true)
+            if [ -z "$found" ]; then
+              echo "Missing artifact for $OS: $1 (expected $2/$3)"
+              exit 1
+            fi
+            while IFS= read -r f; do artifacts+=("$f"); done <<< "$found"
+          }
+          case "$OS" in
+            ubuntu-latest)
+              need deb "$bundle/deb" '*.deb'
+              need rpm "$bundle/rpm" '*.rpm'
+              ;;
+            windows-cross-latest)
+              need "nsis installer" "$xbundle/bundle/nsis" '*-setup.exe'
+              need "portable exe" "$xbundle" 'google-messages.exe'
+              ;;
+            macos-latest)
+              need dmg "$bundle/dmg" '*.dmg'
+              ;;
+            *)
+              echo "Unknown matrix.os: $OS"
+              exit 1
+              ;;
+          esac
+          printf 'Found: %s\n' "${artifacts[@]}"
+
+          auth="Authorization: token $TOKEN"
+          resp=$(mktemp)
+
+          get_release() {
+            curl -sS -o "$resp" -w '%{http_code}' -H "$auth" "$API/releases/tags/$tag"
+          }
+          code=$(get_release)
+          if [ "$code" = "404" ]; then
+            echo "No release for $tag yet, creating it"
+            code=$(curl -sS -o "$resp" -w '%{http_code}' -X POST \
+              -H "$auth" -H 'Content-Type: application/json' \
+              -d "{\"tag_name\":\"$tag\",\"name\":\"$tag\",\"body\":\"\"}" \
+              "$API/releases")
+            if [ "$code" = "409" ]; then
+              echo "Release for $tag was created concurrently, re-reading it"
+              code=$(get_release)
+            fi
+          fi
+          case "$code" in
+            200|201) ;;
+            *)
+              echo "Release lookup/creation failed for $tag (HTTP $code):"
+              cat "$resp"
+              exit 1
+              ;;
+          esac
+          # The release id is the first "id" field in the response object.
+          id=$(grep -o '"id":[0-9]*' "$resp" | head -n 1 | cut -d: -f2)
+          if [ -z "$id" ]; then
+            echo "Could not read release id from response:"
+            cat "$resp"
+            exit 1
+          fi
+          echo "Using release $id for $tag"
+
+          for f in "${artifacts[@]}"; do
+            name=$(basename "$f")
+            # Bundle names contain a space ("Google Messages_..."); encode it
+            # for the query string.
+            code=$(curl -sS -o "$resp" -w '%{http_code}' -X POST -H "$auth" \
+              --form "attachment=@$f" \
+              "$API/releases/$id/assets?name=${name// /%20}")
+            if [ "$code" != "201" ]; then
+              echo "Upload of $name failed (HTTP $code):"
+              cat "$resp"
+              exit 1
+            fi
+            echo "Uploaded asset: $name"
+          done
