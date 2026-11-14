@@ -27,7 +27,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        # windows-cross-latest is a Linux container (no WebKitGTK) that
+        # cross-compiles for MSVC via cargo-xwin; it is not a Windows host, so
+        # runner.os is Linux there and steps must key on matrix.os instead.
+        os: [macos-latest, windows-cross-latest, ubuntu-latest]
     defaults:
       run:
         working-directory: src-tauri
@@ -35,7 +38,7 @@ jobs:
       - uses: actions/checkout@v4
       # Same packages as scripts/setup-dev.sh installs on apt-based distros.
       - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -48,12 +51,22 @@ jobs:
         with:
           workspaces: src-tauri
       - name: Check formatting
-        if: runner.os == 'macOS'
+        if: matrix.os == 'macos-latest'
         run: cargo fmt --check
       # Each OS compiles its own platform-specific code (notifications,
       # permissions, tray), so this is also the cross-platform build check.
       - name: Test
+        if: matrix.os != 'windows-cross-latest'
         run: cargo test
       # Advisory: lints are reported in the log but do not fail the build.
       - name: Clippy
+        if: matrix.os != 'windows-cross-latest'
         run: cargo clippy --all-targets
+      # MSVC-target test binaries cannot run without Windows, so the cross leg
+      # only builds and lints.
+      - name: Build (Windows cross)
+        if: matrix.os == 'windows-cross-latest'
+        run: cargo xwin build --target x86_64-pc-windows-msvc
+      - name: Clippy (Windows cross, advisory)
+        if: matrix.os == 'windows-cross-latest'
+        run: cargo xwin clippy --target x86_64-pc-windows-msvc
