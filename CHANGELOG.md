@@ -5,6 +5,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-11-14
+
+### Fixed
+- **Clear desktop notifications & unread badges when read or replied to on phone:**
+  - Observes both `<title>` and sidebar `mws-conversation-list-item` DOM state
+    (including outgoing `"You: ..."` snippets) so stale `(N)` title counts and
+    tray/taskbar/Dock badges clear immediately when messages are read or replied
+    to from your phone while the desktop window is unfocused or in the tray.
+  - Tracks active notifications by conversation tag/ID (including
+    `ServiceWorkerRegistration.showNotification` / `getNotifications`) and
+    dismisses OS notifications on Windows (`OrigNotification.close()`), macOS
+    (`removeDeliveredNotification` / `removeAllDeliveredNotifications`), and
+    Linux D-Bus (`CloseNotification`) when `.close()` is called, a conversation
+    is read, or unread count reaches `0`.
+  - Adds a low-rate `setTimeout` fallback for `requestAnimationFrame` when
+    `document.hidden` is true so Angular flushes phone sync updates while
+    hidden in the tray.
+
 ## [1.3.0] - 2026-11-12
 
 ### Added
