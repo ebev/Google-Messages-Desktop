@@ -433,6 +433,8 @@ pub fn run() {
             focus_main_window,
             adjust_zoom,
             send_native_notification,
+            close_native_notification,
+            clear_native_notifications,
             report_heartbeat,
             set_session_yielded,
             prompt_takeover_session
@@ -574,6 +576,7 @@ fn set_session_yielded(app: tauri::AppHandle, yielded: bool) {
             if !main_focused && SHOW_NOTIFICATIONS.load(Ordering::Relaxed) {
                 send_os_notification(
                     &app,
+                    "gm-takeover".to_string(),
                     "Google Messages is open on another computer".to_string(),
                     "Click to open and move the session here, or ignore to let the app sleep."
                         .to_string(),
@@ -583,17 +586,39 @@ fn set_session_yielded(app: tauri::AppHandle, yielded: bool) {
         }
     } else {
         TAKEOVER_NOTIFIED.store(false, Ordering::Relaxed);
+        close_os_notification(&app, "gm-takeover");
     }
 }
 
 #[tauri::command]
-fn send_native_notification(app: tauri::AppHandle, title: String, body: String, kind: String) {
+fn send_native_notification(
+    app: tauri::AppHandle,
+    id: Option<String>,
+    title: String,
+    body: String,
+    kind: String,
+) {
     #[cfg(debug_assertions)]
-    eprintln!("[ipc] send_native_notification(kind={kind}, title={title})");
+    eprintln!("[ipc] send_native_notification(id={id:?}, kind={kind}, title={title})");
     if !SHOW_NOTIFICATIONS.load(Ordering::Relaxed) {
         return;
     }
-    send_os_notification(&app, title, body, kind == "takeover");
+    let notif_id = id.unwrap_or_else(|| "gm-msg-default".to_string());
+    send_os_notification(&app, notif_id, title, body, kind == "takeover");
+}
+
+#[tauri::command]
+fn close_native_notification(app: tauri::AppHandle, id: String) {
+    #[cfg(debug_assertions)]
+    eprintln!("[ipc] close_native_notification({id})");
+    close_os_notification(&app, &id);
+}
+
+#[tauri::command]
+fn clear_native_notifications(app: tauri::AppHandle) {
+    #[cfg(debug_assertions)]
+    eprintln!("[ipc] clear_native_notifications");
+    clear_os_notifications(&app);
 }
 
 #[tauri::command]
@@ -772,6 +797,8 @@ mod macos_native {
             const { RefCell::new(None) };
         static NOTIF_DELEGATE: RefCell<Option<Retained<GmNotificationDelegate>>> =
             const { RefCell::new(None) };
+        static DELIVERED_NOTIFS: RefCell<std::collections::HashMap<String, Retained<NSUserNotification>>> =
+            RefCell::new(std::collections::HashMap::new());
     }
 
     pub fn init_notifications(app: &tauri::AppHandle) {
@@ -818,6 +845,7 @@ mod macos_native {
 
     pub fn send_notification(
         app: &tauri::AppHandle,
+        id: String,
         title: String,
         body: String,
         is_takeover: bool,
@@ -825,18 +853,28 @@ mod macos_native {
         let _ = app.run_on_main_thread(move || {
             #[allow(deprecated)]
             {
+                let center = NSUserNotificationCenter::defaultUserNotificationCenter();
+                let seq = NOTIF_SEQ.fetch_add(1, Ordering::Relaxed);
+                let eff_id = if !id.is_empty() {
+                    id
+                } else if is_takeover {
+                    format!("gm-takeover-{seq}")
+                } else {
+                    format!("gm-msg-{seq}")
+                };
+
+                DELIVERED_NOTIFS.with(|slot| {
+                    if let Some(prev) = slot.borrow_mut().remove(&eff_id) {
+                        center.removeDeliveredNotification(&prev);
+                    }
+                });
+
                 let notif = NSUserNotification::new();
                 notif.setTitle(Some(&NSString::from_str(&title)));
                 if !body.is_empty() {
                     notif.setInformativeText(Some(&NSString::from_str(&body)));
                 }
-                let seq = NOTIF_SEQ.fetch_add(1, Ordering::Relaxed);
-                let id = if is_takeover {
-                    format!("gm-takeover-{seq}")
-                } else {
-                    format!("gm-msg-{seq}")
-                };
-                notif.setIdentifier(Some(&NSString::from_str(&id)));
+                notif.setIdentifier(Some(&NSString::from_str(&eff_id)));
                 unsafe {
                     notif.setSoundName(Some(NSUserNotificationDefaultSoundName));
                 }
@@ -845,24 +883,104 @@ mod macos_native {
                     notif.setActionButtonTitle(ns_string!("Switch Here"));
                     notif.setOtherButtonTitle(ns_string!("No"));
                 }
-                let center = NSUserNotificationCenter::defaultUserNotificationCenter();
                 center.deliverNotification(&notif);
+                DELIVERED_NOTIFS.with(|slot| {
+                    slot.borrow_mut().insert(eff_id, notif);
+                });
+            }
+        });
+    }
+
+    pub fn close_notification(app: &tauri::AppHandle, id: &str) {
+        let id = id.to_string();
+        let _ = app.run_on_main_thread(move || {
+            #[allow(deprecated)]
+            {
+                let center = NSUserNotificationCenter::defaultUserNotificationCenter();
+                let removed = DELIVERED_NOTIFS.with(|slot| slot.borrow_mut().remove(&id));
+                if let Some(notif) = removed {
+                    center.removeDeliveredNotification(&notif);
+                } else {
+                    let temp = NSUserNotification::new();
+                    temp.setIdentifier(Some(&NSString::from_str(&id)));
+                    center.removeDeliveredNotification(&temp);
+                }
+            }
+        });
+    }
+
+    pub fn clear_notifications(app: &tauri::AppHandle) {
+        let _ = app.run_on_main_thread(move || {
+            #[allow(deprecated)]
+            {
+                DELIVERED_NOTIFS.with(|slot| slot.borrow_mut().clear());
+                NSUserNotificationCenter::defaultUserNotificationCenter()
+                    .removeAllDeliveredNotifications();
             }
         });
     }
 }
 
 #[cfg(target_os = "macos")]
-fn send_os_notification(app: &tauri::AppHandle, title: String, body: String, is_takeover: bool) {
-    macos_native::send_notification(app, title, body, is_takeover);
+fn send_os_notification(
+    app: &tauri::AppHandle,
+    id: String,
+    title: String,
+    body: String,
+    is_takeover: bool,
+) {
+    macos_native::send_notification(app, id, title, body, is_takeover);
+}
+
+#[cfg(target_os = "macos")]
+fn close_os_notification(app: &tauri::AppHandle, id: &str) {
+    macos_native::close_notification(app, id);
+}
+
+#[cfg(target_os = "macos")]
+fn clear_os_notifications(app: &tauri::AppHandle) {
+    macos_native::clear_notifications(app);
 }
 
 #[cfg(target_os = "linux")]
-fn send_os_notification(app: &tauri::AppHandle, title: String, body: String, is_takeover: bool) {
+static LINUX_NOTIF_IDS: OnceLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
+    OnceLock::new();
+
+#[cfg(target_os = "linux")]
+fn linux_notif_map() -> &'static std::sync::Mutex<std::collections::HashMap<String, u32>> {
+    LINUX_NOTIF_IDS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(target_os = "linux")]
+fn close_linux_dbus_id(dbus_id: u32) {
+    std::thread::spawn(move || {
+        if let Ok(handle) = notify_rust::Notification::new()
+            .id(dbus_id)
+            .timeout(notify_rust::Timeout::Milliseconds(1))
+            .show()
+        {
+            handle.close();
+        }
+    });
+}
+
+#[cfg(target_os = "linux")]
+fn send_os_notification(
+    app: &tauri::AppHandle,
+    id: String,
+    title: String,
+    body: String,
+    is_takeover: bool,
+) {
     let app = app.clone();
     std::thread::spawn(move || {
         let mut n = notify_rust::Notification::new();
         n.summary(&title).body(&body).auto_icon();
+        if let Ok(guard) = linux_notif_map().lock() {
+            if let Some(&existing_id) = guard.get(&id) {
+                n.id(existing_id);
+            }
+        }
         if is_takeover {
             n.action("default", "Open")
                 .action("use_here", "Switch Here")
@@ -871,6 +989,10 @@ fn send_os_notification(app: &tauri::AppHandle, title: String, body: String, is_
             n.action("default", "Open");
         }
         if let Ok(handle) = n.show() {
+            let dbus_id = handle.id();
+            if let Ok(mut guard) = linux_notif_map().lock() {
+                guard.insert(id.clone(), dbus_id);
+            }
             handle.wait_for_action(|action| match action {
                 "default" | "use_here" => {
                     if is_takeover {
@@ -881,23 +1003,77 @@ fn send_os_notification(app: &tauri::AppHandle, title: String, body: String, is_
                 }
                 _ => {}
             });
+            if let Ok(mut guard) = linux_notif_map().lock() {
+                if guard.get(&id) == Some(&dbus_id) {
+                    guard.remove(&id);
+                }
+            }
         }
     });
 }
 
+#[cfg(target_os = "linux")]
+fn close_os_notification(_app: &tauri::AppHandle, id: &str) {
+    let removed = linux_notif_map().lock().ok().and_then(|mut g| g.remove(id));
+    if let Some(dbus_id) = removed {
+        close_linux_dbus_id(dbus_id);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn clear_os_notifications(_app: &tauri::AppHandle) {
+    let ids: Vec<u32> = linux_notif_map()
+        .lock()
+        .map(|mut g| g.drain().map(|(_, v)| v).collect())
+        .unwrap_or_default();
+    for dbus_id in ids {
+        close_linux_dbus_id(dbus_id);
+    }
+}
+
 #[cfg(windows)]
-fn send_os_notification(app: &tauri::AppHandle, title: String, body: String, is_takeover: bool) {
+fn send_os_notification(
+    app: &tauri::AppHandle,
+    id: String,
+    title: String,
+    body: String,
+    is_takeover: bool,
+) {
     if let Some(window) = app.get_webview_window("main") {
-        if let (Ok(t), Ok(b)) = (serde_json::to_string(&title), serde_json::to_string(&body)) {
+        if let (Ok(i), Ok(t), Ok(b)) = (
+            serde_json::to_string(&id),
+            serde_json::to_string(&title),
+            serde_json::to_string(&body),
+        ) {
             let kind = if is_takeover {
                 "\"takeover\""
             } else {
                 "\"message\""
             };
             let _ = window.eval(&format!(
-                "window.__gmShowWebviewNotification && window.__gmShowWebviewNotification({t}, {b}, {kind});"
+                "window.__gmShowWebviewNotification && window.__gmShowWebviewNotification({t}, {b}, {kind}, {{ tag: {i} }});"
             ));
         }
+    }
+}
+
+#[cfg(windows)]
+fn close_os_notification(app: &tauri::AppHandle, id: &str) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(i) = serde_json::to_string(id) {
+            let _ = window.eval(&format!(
+                "window.__gmCloseWebviewNotification && window.__gmCloseWebviewNotification({i});"
+            ));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn clear_os_notifications(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.eval(
+            "window.__gmClearWebviewNotifications && window.__gmClearWebviewNotifications();",
+        );
     }
 }
 
@@ -1404,6 +1580,9 @@ fn set_tray_badge(app: tauri::AppHandle, count: u32) {
     if let Some(window) = app.get_webview_window("main") {
         apply_window_badge(&window, count);
     }
+    if count == 0 {
+        clear_os_notifications(&app);
+    }
 
     if let Some(tray) = app.tray_by_id("main") {
         if count > 0 {
@@ -1529,69 +1708,264 @@ const INIT_SCRIPT: &str = r#"
         return Promise.reject(new Error('Tauri IPC unavailable'));
     }
 
-    // --- Unread badge via title observation (+ fallback notification) ---
+    // --- Unread badge & notification sync (title + DOM conversation list) ---
     function parseUnread(title) {
-        const m = title.match(/\((\d+)\)/);
+        const m = (title || '').match(/\((\d+)\)/);
         return m ? parseInt(m[1], 10) : 0;
     }
 
     let lastUnreadCount = null;
+    let lastTitleRawCount = 0;
+    let sawDomUnread = false;
+    let notifClosedByAppSinceIncrease = false;
     let lastWebNotifAt = 0;
+    let pendingFallbackTimer = null;
+    let badgeSyncTimer = null;
+    let nextNotifSeq = 1;
+    const activeNotifications = new Map();
 
-    function findLatestUnreadPreview() {
+    function getConversationTitle(el) {
+        if (!el) return '';
+        const nameEl = el.querySelector('[data-e2e-conversation-name], .name, h2, h3');
+        return nameEl && nameEl.textContent ? nameEl.textContent.trim() : '';
+    }
+
+    function getConversationSnippet(el) {
+        if (!el) return '';
+        const snipEl = el.querySelector('mws-conversation-snippet, [data-e2e-conversation-snippet], .snippet');
+        return snipEl && snipEl.textContent ? snipEl.textContent.trim() : '';
+    }
+
+    function isConversationItemUnread(el) {
+        if (!el) return false;
+        const snip = getConversationSnippet(el);
+        // Outgoing replies ("You: ...") mean the user already replied (e.g. from phone)
+        if (/^You\s*:/i.test(snip)) {
+            return false;
+        }
+        const e2eAttr = el.getAttribute('data-e2e-is-unread');
+        if (e2eAttr === 'true') return true;
+        if (e2eAttr === 'false') return false;
+        if (el.querySelector('[data-e2e-is-unread="true"]')) return true;
+        if (el.querySelector('[data-e2e-is-unread="false"]')) return false;
+        if (el.classList && el.classList.contains('unread')) return true;
+        if (el.querySelector('.unread, .unread-badge, [data-e2e-unread-badge]')) return true;
+
+        const ariaNodes = el.querySelectorAll('[aria-label]');
+        let aria = el.getAttribute('aria-label') || '';
+        for (let i = 0; i < ariaNodes.length; i++) {
+            aria += ' ' + (ariaNodes[i].getAttribute('aria-label') || '');
+        }
+        if (/\bunread\b/i.test(aria)) return true;
+
+        const textEl = el.querySelector('[data-e2e-conversation-snippet], mws-conversation-snippet, [data-e2e-conversation-name], .name');
+        if (textEl && window.getComputedStyle) {
+            const fw = parseInt(window.getComputedStyle(textEl).fontWeight, 10);
+            if (fw >= 600) return true;
+        }
+        return false;
+    }
+
+    function inspectDomConversations() {
         const items = document.querySelectorAll('mws-conversation-list-item');
+        const unreadTitles = new Set();
+        let firstPreview = null;
+        let topOrSelectedRepliedByYou = false;
+
         for (let i = 0; i < items.length; i++) {
             const el = items[i];
-            const aria = (el.getAttribute('aria-label') || '') + ' ' +
-                ((el.querySelector('[aria-label]') && el.querySelector('[aria-label]').getAttribute('aria-label')) || '');
-            const isUnread = /unread/i.test(aria) || el.querySelector('.unread, [data-e2e-is-unread="true"]');
-            if (isUnread) {
-                const nameEl = el.querySelector('[data-e2e-conversation-name], .name, h2, h3');
-                const snipEl = el.querySelector('mws-conversation-snippet, [data-e2e-conversation-snippet], .snippet');
-                const title = nameEl && nameEl.textContent ? nameEl.textContent.trim() : 'Google Messages';
-                const body = snipEl && snipEl.textContent ? snipEl.textContent.trim() : 'New unread message';
-                if (title || body) {
-                    return { title: title || 'Google Messages', body: body || 'New unread message' };
+            const title = getConversationTitle(el);
+            const snip = getConversationSnippet(el);
+            const isSelected = !!(
+                el.classList && el.classList.contains('selected') ||
+                el.getAttribute('aria-selected') === 'true' ||
+                el.querySelector('.selected, [aria-selected="true"]')
+            );
+            if ((i === 0 || isSelected) && /^You\s*:/i.test(snip)) {
+                topOrSelectedRepliedByYou = true;
+            }
+            if (isConversationItemUnread(el)) {
+                if (title) unreadTitles.add(title);
+                if (!firstPreview && (title || snip)) {
+                    firstPreview = {
+                        title: title || 'Google Messages',
+                        body: snip || 'New unread message'
+                    };
                 }
             }
         }
-        return null;
+        return {
+            totalItems: items.length,
+            unreadCount: unreadTitles.size,
+            unreadTitles: unreadTitles,
+            firstPreview: firstPreview,
+            topOrSelectedRepliedByYou: topOrSelectedRepliedByYou
+        };
+    }
+
+    function computeEffectiveUnread(domInfo) {
+        const titleCount = parseUnread(document.title);
+        if (titleCount === 0) {
+            lastTitleRawCount = 0;
+            sawDomUnread = false;
+            notifClosedByAppSinceIncrease = false;
+            return 0;
+        }
+
+        if (titleCount > lastTitleRawCount) {
+            lastTitleRawCount = titleCount;
+            notifClosedByAppSinceIncrease = false;
+            if (domInfo.unreadCount > 0) {
+                sawDomUnread = true;
+            }
+        }
+
+        if (domInfo.totalItems > 0) {
+            if (domInfo.unreadCount > 0) {
+                sawDomUnread = true;
+                return Math.min(titleCount, domInfo.unreadCount);
+            }
+            // All sidebar items are now read in the DOM, or the user replied on
+            // their phone, or Google Messages closed its notification: clear the
+            // stale unfocused (N) title count.
+            if (sawDomUnread || notifClosedByAppSinceIncrease || domInfo.topOrSelectedRepliedByYou) {
+                if (/^\(\d+\)\s*/.test(document.title)) {
+                    document.title = document.title.replace(/^\(\d+\)\s*/, '');
+                }
+                lastTitleRawCount = 0;
+                sawDomUnread = false;
+                notifClosedByAppSinceIncrease = false;
+                return 0;
+            }
+        } else if (notifClosedByAppSinceIncrease) {
+            return 0;
+        }
+
+        return titleCount;
+    }
+
+    function closeNotificationEntry(entry, notifyBackend) {
+        if (!entry) return;
+        activeNotifications.delete(entry.id);
+        if (entry.webviewNotif) {
+            try { entry.webviewNotif.close(); } catch (_) {}
+        } else if (notifyBackend) {
+            invoke('close_native_notification', { id: entry.id }).catch(function () {});
+        }
+    }
+
+    function clearAllMessageNotifications() {
+        if (pendingFallbackTimer) {
+            clearTimeout(pendingFallbackTimer);
+            pendingFallbackTimer = null;
+        }
+        const toClose = [];
+        activeNotifications.forEach(function (entry) {
+            if (entry.kind !== 'takeover') {
+                toClose.push(entry);
+            }
+        });
+        for (let i = 0; i < toClose.length; i++) {
+            closeNotificationEntry(toClose[i], false);
+        }
+        invoke('clear_native_notifications').catch(function () {});
+    }
+
+    function pruneReadConversationNotifications(unreadTitles) {
+        if (!unreadTitles || unreadTitles.size === 0) return;
+        const toClose = [];
+        activeNotifications.forEach(function (entry) {
+            if (entry.kind !== 'takeover' && entry.title && entry.title !== 'Google Messages' && !unreadTitles.has(entry.title)) {
+                toClose.push(entry);
+            }
+        });
+        for (let i = 0; i < toClose.length; i++) {
+            closeNotificationEntry(toClose[i], true);
+        }
     }
 
     function syncBadge() {
-        const count = parseUnread(document.title);
+        const domInfo = inspectDomConversations();
+        const count = computeEffectiveUnread(domInfo);
+
+        if (count === 0 && activeNotifications.size > 0) {
+            clearAllMessageNotifications();
+        } else if (count > 0 && domInfo.unreadCount > 0) {
+            pruneReadConversationNotifications(domInfo.unreadTitles);
+        }
+
         if (count === lastUnreadCount) return;
         const prev = lastUnreadCount;
         lastUnreadCount = count;
         invoke('set_tray_badge', { count }).catch(function () {});
 
+        if (count === 0) {
+            clearAllMessageNotifications();
+            return;
+        }
+
         // Safety-net notification if the unread count increased while the
         // window is unfocused/hidden and the web app didn't fire Notification.
         if (prev !== null && count > prev && window.__GM_SHOW_NOTIFICATIONS !== false && !document.hasFocus()) {
-            setTimeout(function () {
+            if (pendingFallbackTimer) clearTimeout(pendingFallbackTimer);
+            pendingFallbackTimer = setTimeout(function () {
+                pendingFallbackTimer = null;
                 if (Date.now() - lastWebNotifAt < 3000) return;
+                if (lastUnreadCount === 0 || notifClosedByAppSinceIncrease) return;
                 if (detectOtherSession()) return;
-                const preview = findLatestUnreadPreview();
+                const latestDom = inspectDomConversations();
+                const preview = latestDom.firstPreview;
                 const title = preview ? preview.title : 'Google Messages';
                 const body = preview
                     ? preview.body
                     : (count === 1 ? 'You have 1 unread message' : 'You have ' + count + ' unread messages');
-                dispatchNotification(title, body, 'message');
+                dispatchNotification(title, body, 'message', {
+                    tag: preview && preview.title ? ('gm-conv-' + preview.title) : 'gm-unread-fallback'
+                });
             }, 1500);
         }
     }
 
+    function scheduleBadgeSync() {
+        if (badgeSyncTimer) return;
+        badgeSyncTimer = setTimeout(function () {
+            badgeSyncTimer = null;
+            syncBadge();
+        }, 120);
+    }
+
     const titleObserver = new MutationObserver(syncBadge);
-    // Observe <title> changes
+    const convObserver = new MutationObserver(scheduleBadgeSync);
+    let observedTitleEl = null;
+
     const observeTitle = () => {
         const titleEl = document.querySelector('title');
-        if (titleEl) {
+        if (titleEl && titleEl !== observedTitleEl) {
+            observedTitleEl = titleEl;
             titleObserver.observe(titleEl, { childList: true, characterData: true, subtree: true });
             syncBadge();
-        } else {
+        } else if (!titleEl) {
             setTimeout(observeTitle, 500);
         }
+        if (document.head) {
+            titleObserver.observe(document.head, { childList: true });
+        }
+        if (document.body) {
+            convObserver.observe(document.body, {
+                childList: true,
+                subtree: true,
+                characterData: true,
+                attributes: true,
+                attributeFilter: ['data-e2e-is-unread', 'class', 'aria-label']
+            });
+        }
     };
+    setInterval(syncBadge, 2500);
+    window.addEventListener('focus', function () {
+        syncBadge();
+        setTimeout(syncBadge, 350);
+        setTimeout(syncBadge, 1000);
+    });
 
     // --- Settings gear, docked left of the Google account avatar ---
     // The avatar is looked up by stable-ish attributes and re-checked as the
@@ -1956,17 +2330,24 @@ const INIT_SCRIPT: &str = r#"
         } catch (_) {}
     }
 
-    function createNotificationStub() {
+    function createNotificationStub(onAppClose, tag, title, body) {
         const listeners = {};
         return {
+            title: String(title || ''),
+            body: String(body || ''),
+            tag: String(tag || ''),
             onclick: null,
             onshow: null,
             onclose: null,
             onerror: null,
             close: function () {
+                if (typeof onAppClose === 'function') {
+                    try { onAppClose(); } catch (_) {}
+                }
                 if (typeof this.onclose === 'function') {
                     try { this.onclose(); } catch (_) {}
                 }
+                this.dispatchEvent({ type: 'close' });
             },
             addEventListener: function (type, fn) {
                 if (!listeners[type]) listeners[type] = [];
@@ -1986,44 +2367,109 @@ const INIT_SCRIPT: &str = r#"
         };
     }
 
-    function dispatchNotification(title, body, kind) {
+    function dispatchNotification(title, body, kind, options) {
+        const opts = options || {};
+        const normTitle = String(title || 'Google Messages').trim();
+        const normBody = String(body || '');
+        const effKind = kind || 'message';
+        const tag = opts.tag
+            ? String(opts.tag)
+            : (effKind === 'takeover' ? 'gm-session-takeover' : ('gm-conv-' + normTitle));
+        const id = tag || ('gm-notif-' + (nextNotifSeq++));
+
         if (window.__GM_SHOW_NOTIFICATIONS === false) {
-            return createNotificationStub();
+            return createNotificationStub(null, tag, normTitle, normBody);
         }
-        if (kind === 'message') {
+        if (effKind === 'message') {
             lastWebNotifAt = Date.now();
         }
+
+        if (activeNotifications.has(id)) {
+            closeNotificationEntry(activeNotifications.get(id), true);
+        }
+
+        const entry = {
+            id: id,
+            tag: tag,
+            title: normTitle,
+            kind: effKind,
+            webviewNotif: null,
+            stub: null
+        };
+
+        const stub = createNotificationStub(function () {
+            // Invoked when Google Messages Web explicitly calls notification.close()
+            // (e.g., when a message is read or replied to on the phone).
+            closeNotificationEntry(entry, true);
+            if (effKind === 'message') {
+                notifClosedByAppSinceIncrease = true;
+                scheduleBadgeSync();
+                setTimeout(syncBadge, 400);
+            }
+        }, tag, normTitle, normBody);
+        entry.stub = stub;
+
         if (useWebviewNotification) {
             try {
-                const n = new OrigNotification(title, {
-                    body: body || '',
-                    tag: kind === 'takeover' ? 'gm-session-takeover' : undefined
+                const n = new OrigNotification(normTitle, {
+                    body: normBody,
+                    tag: tag,
+                    icon: opts.icon || undefined,
+                    silent: opts.silent || undefined
                 });
-                n.addEventListener('click', function () {
-                    if (kind === 'takeover') {
+                entry.webviewNotif = n;
+                n.addEventListener('click', function (evt) {
+                    activeNotifications.delete(id);
+                    if (typeof stub.onclick === 'function') {
+                        try { stub.onclick(evt); } catch (_) {}
+                    }
+                    stub.dispatchEvent({ type: 'click' });
+                    if (effKind === 'takeover') {
                         invoke('prompt_takeover_session').catch(function () {});
                     } else {
                         focusAppWindow();
                     }
                 });
-                return n;
+                activeNotifications.set(id, entry);
+                return stub;
             } catch (_) {}
         }
+
+        activeNotifications.set(id, entry);
         invoke('send_native_notification', {
-            title: String(title || 'Google Messages'),
-            body: String(body || ''),
-            kind: kind || 'message'
+            id: id,
+            title: normTitle,
+            body: normBody,
+            kind: effKind
         }).catch(function () {});
-        return createNotificationStub();
+        return stub;
     }
 
-    window.__gmShowWebviewNotification = function (title, body, kind) {
-        dispatchNotification(title, body, kind || 'message');
+    window.__gmShowWebviewNotification = function (title, body, kind, options) {
+        dispatchNotification(title, body, kind || 'message', options);
+    };
+
+    window.__gmCloseWebviewNotification = function (id) {
+        if (id && activeNotifications.has(id)) {
+            closeNotificationEntry(activeNotifications.get(id), false);
+        }
+    };
+
+    window.__gmClearWebviewNotifications = function () {
+        const toClose = [];
+        activeNotifications.forEach(function (entry) {
+            if (entry.kind !== 'takeover') {
+                toClose.push(entry);
+            }
+        });
+        for (let i = 0; i < toClose.length; i++) {
+            closeNotificationEntry(toClose[i], false);
+        }
     };
 
     function GMNotification(title, options) {
         const opts = options || {};
-        return dispatchNotification(title, opts.body || '', 'message');
+        return dispatchNotification(title, opts.body || '', 'message', opts);
     }
     GMNotification.requestPermission = function () {
         if (useWebviewNotification && OrigNotification.requestPermission) {
@@ -2040,6 +2486,46 @@ const INIT_SCRIPT: &str = r#"
         }
     });
     window.Notification = GMNotification;
+
+    if (typeof window.ServiceWorkerRegistration === 'function' && window.ServiceWorkerRegistration.prototype) {
+        window.ServiceWorkerRegistration.prototype.showNotification = function (title, options) {
+            const opts = options || {};
+            dispatchNotification(title, opts.body || '', 'message', opts);
+            return Promise.resolve();
+        };
+        window.ServiceWorkerRegistration.prototype.getNotifications = function (filter) {
+            const tagFilter = filter && filter.tag ? String(filter.tag) : null;
+            const list = [];
+            activeNotifications.forEach(function (entry) {
+                if (!tagFilter || entry.tag === tagFilter) {
+                    list.push(entry.stub);
+                }
+            });
+            return Promise.resolve(list);
+        };
+    }
+
+    // Keep requestAnimationFrame progressing at a low rate when hidden in the
+    // tray so Angular / Google Messages flushes DOM and <title> updates when
+    // messages are read or replied to on the phone.
+    const origRAF = window.requestAnimationFrame;
+    const origCAF = window.cancelAnimationFrame;
+    if (typeof origRAF === 'function') {
+        window.requestAnimationFrame = function (cb) {
+            if (document.hidden && window.__GM_BACKGROUND_KEEP_ALIVE !== false) {
+                return window.setTimeout(function () {
+                    cb(performance.now());
+                }, 50);
+            }
+            return origRAF.call(window, cb);
+        };
+        window.cancelAnimationFrame = function (id) {
+            window.clearTimeout(id);
+            if (typeof origCAF === 'function') {
+                try { origCAF.call(window, id); } catch (_) {}
+            }
+        };
+    }
 
     // --- "Google Messages is open on another computer" protection ---
     function isElementVisible(el) {

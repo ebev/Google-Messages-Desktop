@@ -351,6 +351,18 @@
           "markdownDescription": "Enables the adjust_zoom command without any pre-configured scope."
         },
         {
+          "description": "Enables the clear_native_notifications command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-clear-native-notifications",
+          "markdownDescription": "Enables the clear_native_notifications command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the close_native_notification command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-close-native-notification",
+          "markdownDescription": "Enables the close_native_notification command without any pre-configured scope."
+        },
+        {
           "description": "Enables the focus_main_window command without any pre-configured scope.",
           "type": "string",
           "const": "allow-focus-main-window",
@@ -415,6 +427,18 @@
           "type": "string",
           "const": "deny-adjust-zoom",
           "markdownDescription": "Denies the adjust_zoom command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clear_native_notifications command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-clear-native-notifications",
+          "markdownDescription": "Denies the clear_native_notifications command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the close_native_notification command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-close-native-notification",
+          "markdownDescription": "Denies the close_native_notification command without any pre-configured scope."
         },
         {
           "description": "Denies the focus_main_window command without any pre-configured scope.",
