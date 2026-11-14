@@ -53,8 +53,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         with:
           workspaces: src-tauri
+      # All legs run this: on mac it verifies rustup fast AND puts cargo on the
+      # launchd PATH (which lacks ~/.cargo/bin — without it tauri can't run
+      # `cargo metadata` and the leg dies in a second).
       - uses: dtolnay/rust-toolchain@stable
-        if: matrix.os != 'macos-latest'
       - name: Build (Linux deb/rpm)
         if: matrix.os == 'ubuntu-latest'
         run: npm run tauri build -- -b deb,rpm
