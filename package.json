@@ -1,16 +1,15 @@
 {
   "name": "google-messages",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "private": true,
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "node --test"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.2"
-  },
-  "dependencies": {
-    "@tauri-apps/api": "^2"
+    "@tauri-apps/cli": "^2.11.2",
+    "jsdom": "^31.0.1"
   }
 }
