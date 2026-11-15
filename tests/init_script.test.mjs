@@ -1,0 +1,462 @@
+// Regression tests for the script injected into the Google Messages page
+// (src-tauri/src/init_script.js). Each test loads the script into a fresh
+// jsdom page that stands in for messages.google.com, with a fake Tauri IPC
+// object that records every command the script sends to Rust.
+//
+// Run with: npm test
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { JSDOM } from 'jsdom';
+
+const SCRIPT = readFileSync(new URL('../src-tauri/src/init_script.js', import.meta.url), 'utf8');
+
+const PAGE = `<!DOCTYPE html><html><head><title>Messages</title></head><body>
+  <div><a id="avatar" aria-label="Google Account: test" href="#">A</a></div>
+  <mws-conversations-list>
+    <mws-conversation-list-item id="alice" data-e2e-is-unread="false">
+      <span data-e2e-conversation-name>Alice</span><mws-conversation-snippet>hello</mws-conversation-snippet>
+    </mws-conversation-list-item>
+    <mws-conversation-list-item id="bob" data-e2e-is-unread="false">
+      <span data-e2e-conversation-name>Bob</span><mws-conversation-snippet>yo</mws-conversation-snippet>
+    </mws-conversation-list-item>
+    <mws-conversation-list-item id="carol" data-e2e-is-unread="false">
+      <span data-e2e-conversation-name>Carol</span><mws-conversation-snippet>You: ok</mws-conversation-snippet>
+    </mws-conversation-list-item>
+  </mws-conversations-list>
+  <a id="external" href="https://example.com/page" target="_blank">external</a>
+  <a id="internal" href="https://messages.google.com/web/calls" target="_blank">calls</a>
+</body></html>`;
+
+// Loads the script into a new page. Options:
+//   platform       navigator.platform ('MacIntel', 'Linux x86_64', 'Win32')
+//   title          initial document title, e.g. '(2) Messages'
+//   unread         ids of sidebar rows to mark unread before the script runs
+//   notifications  value substituted for the "show notifications" setting
+//   webNotification  a fake window.Notification class (the WebView2 path)
+function loadPage(options = {}) {
+    const dom = new JSDOM(PAGE, {
+        url: 'https://messages.google.com/web/conversations',
+        runScripts: 'outside-only',
+        pretendToBeVisual: true,
+    });
+    const { window } = dom;
+    const calls = [];
+
+    window.__TAURI_INTERNALS__ = {
+        invoke(cmd, args) {
+            // Copy through JSON so the recorded value is a plain object from this
+            // realm rather than the page's (deepEqual compares prototypes).
+            calls.push({ cmd, args: args === undefined ? null : JSON.parse(JSON.stringify(args)) });
+            return Promise.resolve(null);
+        },
+    };
+    Object.defineProperty(window.navigator, 'platform', { value: options.platform || 'MacIntel' });
+    // jsdom does no layout, so report every element as visible and on screen.
+    window.Element.prototype.getBoundingClientRect = () => ({ width: 10, height: 10, top: 10, left: 10 });
+    if (options.webNotification) window.Notification = options.webNotification;
+    // jsdom has no service workers; the script only needs the prototype to patch.
+    window.ServiceWorkerRegistration = function ServiceWorkerRegistration() {};
+    if (options.title) window.document.title = options.title;
+    for (const id of options.unread || []) setUnread(window, id, true);
+
+    window.eval(
+        SCRIPT
+            .replace('__GM_NOTIFICATIONS_DEFAULT__', String(options.notifications !== false))
+            .replace('__GM_KEEP_ALIVE_DEFAULT__', 'true')
+    );
+
+    return {
+        window,
+        document: window.document,
+        calls,
+        // Every recorded call to the given command, in order.
+        sent(cmd) {
+            return calls.filter((c) => c.cmd === cmd);
+        },
+        // Runs the script's own sync pass now, the way the Rust heartbeat does.
+        sync() {
+            window.__gmHeartbeat(false);
+        },
+        // Moves the page's clock forward without waiting.
+        advanceClock(ms) {
+            const realNow = window.Date.now;
+            window.Date.now = () => realNow() + ms;
+        },
+        close() {
+            window.close();
+        },
+    };
+}
+
+function setUnread(window, id, unread) {
+    window.document.getElementById(id).setAttribute('data-e2e-is-unread', String(unread));
+}
+
+function count(page, cmd) {
+    return page.sent(cmd).length;
+}
+
+function last(page, cmd) {
+    const matching = page.sent(cmd);
+    return matching.length ? matching[matching.length - 1].args : undefined;
+}
+
+function click(window, element, type = 'click') {
+    const event = new window.MouseEvent(type, { bubbles: true, cancelable: true, button: type === 'auxclick' ? 1 : 0 });
+    element.dispatchEvent(event);
+    return event;
+}
+
+function pressKey(window, key, modifiers = {}) {
+    const event = new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...modifiers });
+    window.document.dispatchEvent(event);
+    return event;
+}
+
+// --- Unread badge ---
+
+test('reports the unread count from the title and sidebar on load', (t) => {
+    const page = loadPage({ title: '(2) Messages', unread: ['alice', 'bob'] });
+    t.after(page.close);
+    assert.deepEqual(last(page, 'set_tray_badge'), { count: 2 });
+});
+
+test('reports zero unread without scanning when the title has no count', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    assert.deepEqual(last(page, 'set_tray_badge'), { count: 0 });
+});
+
+test('uses the lower of the title count and the unread sidebar rows', (t) => {
+    const page = loadPage({ title: '(3) Messages', unread: ['alice'] });
+    t.after(page.close);
+    assert.deepEqual(last(page, 'set_tray_badge'), { count: 1 });
+});
+
+test('clears a stale title count once the sidebar shows everything read', (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['alice'] });
+    t.after(page.close);
+    setUnread(page.window, 'alice', false);
+    page.sync();
+    assert.deepEqual(last(page, 'set_tray_badge'), { count: 0 });
+    assert.equal(page.document.title, 'Messages');
+});
+
+test('does not count a conversation whose latest message is the user\'s own reply', (t) => {
+    const page = loadPage({ title: '(2) Messages', unread: ['alice', 'carol'] });
+    t.after(page.close);
+    // Carol's snippet is "You: ok", so only Alice's row counts as unread.
+    assert.deepEqual(last(page, 'set_tray_badge'), { count: 1 });
+});
+
+// --- Notifications ---
+
+test('sends web notifications to the native bridge, keyed by tag', (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['alice'] });
+    t.after(page.close);
+    new page.window.Notification('Alice', { body: 'hello', tag: 'conv-1' });
+    new page.window.Notification('Bob', { body: 'yo' });
+    assert.deepEqual(page.sent('send_native_notification').map((c) => c.args), [
+        { id: 'conv-1', title: 'Alice', body: 'hello', kind: 'message' },
+        { id: 'gm-conv-Bob', title: 'Bob', body: 'yo', kind: 'message' },
+    ]);
+});
+
+test('sends nothing when notifications are turned off', (t) => {
+    const page = loadPage({ notifications: false });
+    t.after(page.close);
+    const n = new page.window.Notification('Alice', { body: 'hello' });
+    n.close();
+    assert.equal(count(page, 'send_native_notification'), 0);
+    assert.equal(count(page, 'close_native_notification'), 0);
+});
+
+test('closes the native notification when the web app closes its own', (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['alice'] });
+    t.after(page.close);
+    const n = new page.window.Notification('Alice', { body: 'hello', tag: 'conv-1' });
+    n.close();
+    assert.deepEqual(last(page, 'close_native_notification'), { id: 'conv-1' });
+});
+
+test('a native click runs the web app\'s click handlers exactly once', (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['alice'] });
+    t.after(page.close);
+    const n = new page.window.Notification('Alice', { body: 'hello', tag: 'conv-1' });
+    let onclick = 0;
+    let listener = 0;
+    n.onclick = () => { onclick++; };
+    n.addEventListener('click', () => { listener++; });
+    page.window.__gmNativeNotificationClicked('conv-1');
+    page.window.__gmNativeNotificationClicked('conv-1');
+    page.window.__gmNativeNotificationClicked('unknown-id');
+    assert.deepEqual([onclick, listener], [1, 1]);
+});
+
+test('keeps a new notification through the grace period, then prunes it once its conversation is read', (t) => {
+    const page = loadPage({ title: '(2) Messages', unread: ['alice'] });
+    t.after(page.close);
+    // Bob's row is still marked read: the notification arrived before the sidebar updated.
+    new page.window.Notification('Bob', { body: 'yo' });
+    page.sync();
+    assert.equal(count(page, 'close_native_notification'), 0, 'closed during the grace period');
+    page.advanceClock(6000);
+    page.sync();
+    assert.deepEqual(last(page, 'close_native_notification'), { id: 'gm-conv-Bob' });
+});
+
+test('never prunes a notification whose title matches no sidebar conversation', (t) => {
+    const page = loadPage({ title: '(2) Messages', unread: ['alice'] });
+    t.after(page.close);
+    new page.window.Notification('Someone in a group', { body: 'hi' });
+    page.advanceClock(60000);
+    page.sync();
+    assert.equal(count(page, 'close_native_notification'), 0);
+});
+
+test('keeps a notification whose conversation is still unread', (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['alice'] });
+    t.after(page.close);
+    new page.window.Notification('Alice', { body: 'hello' });
+    page.advanceClock(60000);
+    page.sync();
+    assert.equal(count(page, 'close_native_notification'), 0);
+});
+
+test('clears native notifications once when unread drops to zero, not on every sync', (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['alice'] });
+    t.after(page.close);
+    new page.window.Notification('Alice', { body: 'hello' });
+    const before = count(page, 'clear_native_notifications');
+    setUnread(page.window, 'alice', false);
+    page.document.title = 'Messages';
+    page.sync();
+    page.sync();
+    page.sync();
+    assert.equal(count(page, 'clear_native_notifications') - before, 1);
+});
+
+test('lists and filters active notifications for the service worker API', async (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['alice'] });
+    t.after(page.close);
+    const registration = page.window.ServiceWorkerRegistration;
+    await registration.prototype.showNotification.call({}, 'Alice', { body: 'hello', tag: 'sw-1' });
+    assert.deepEqual(last(page, 'send_native_notification').id, 'sw-1');
+    assert.equal((await registration.prototype.getNotifications.call({}, { tag: 'sw-1' })).length, 1);
+    assert.equal((await registration.prototype.getNotifications.call({}, { tag: 'other' })).length, 0);
+});
+
+// --- WebView2 (Windows) notification path ---
+
+function fakeWebNotification({ failing = false } = {}) {
+    return class FakeNotification {
+        static permission = 'granted';
+        static instances = [];
+        static requestPermission() { return Promise.resolve('granted'); }
+        constructor(title, options) {
+            if (failing) throw new Error('notification unavailable');
+            this.title = title;
+            this.options = options;
+            this.closed = false;
+            FakeNotification.instances.push(this);
+        }
+        addEventListener() {}
+        close() { this.closed = true; }
+    };
+}
+
+test('on Windows, shows notifications through the webview instead of the native bridge', (t) => {
+    const Fake = fakeWebNotification();
+    const page = loadPage({ platform: 'Win32', webNotification: Fake, title: '(1) Messages', unread: ['alice'] });
+    t.after(page.close);
+    const n = new page.window.Notification('Alice', { body: 'hello', tag: 'conv-1' });
+    assert.equal(Fake.instances.length, 1);
+    assert.equal(count(page, 'send_native_notification'), 0);
+    n.close();
+    assert.equal(Fake.instances[0].closed, true);
+});
+
+test('on Windows, a takeover notification does not cause repeated clears while unread is zero', (t) => {
+    const Fake = fakeWebNotification();
+    const page = loadPage({ platform: 'Win32', webNotification: Fake });
+    t.after(page.close);
+    page.window.__gmShowWebviewNotification('Open elsewhere', 'body', 'takeover', { tag: 'gm-takeover' });
+    const before = count(page, 'clear_native_notifications');
+    page.sync();
+    page.sync();
+    assert.equal(count(page, 'clear_native_notifications'), before);
+    // Clearing message notifications leaves the takeover one open.
+    page.window.__gmClearWebviewNotifications();
+    assert.equal(Fake.instances[0].closed, false);
+    page.window.__gmCloseWebviewNotification('gm-takeover');
+    assert.equal(Fake.instances[0].closed, true);
+});
+
+test('a notification requested by Rust never bounces back to Rust when the webview fails', (t) => {
+    const page = loadPage({ platform: 'Win32', webNotification: fakeWebNotification({ failing: true }) });
+    t.after(page.close);
+    page.window.__gmShowWebviewNotification('Alice', 'hello', 'message', { tag: 'conv-1' });
+    assert.equal(count(page, 'send_native_notification'), 0);
+});
+
+// --- Background animation frames ---
+
+test('cancelAnimationFrame never cancels an unrelated timer', async (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const { window } = page;
+    Object.defineProperty(window.document, 'hidden', { configurable: true, get: () => true });
+
+    const fired = [];
+    const cancelled = window.requestAnimationFrame(() => fired.push('cancelled frame'));
+    const kept = window.requestAnimationFrame(() => fired.push('kept frame'));
+    assert.ok(cancelled < 0 && kept < 0, 'background frames use negative ids');
+
+    const timer = window.setTimeout(() => fired.push('timer'), 20);
+    window.cancelAnimationFrame(timer); // a real frame id that happens to equal a timer id
+    window.cancelAnimationFrame(cancelled);
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.deepEqual(fired.sort(), ['kept frame', 'timer']);
+});
+
+// --- Session takeover ---
+
+function addUseHereBanner(document) {
+    const banner = document.createElement('div');
+    banner.id = 'banner';
+    banner.innerHTML = '<p>Google Messages is open on another computer</p><button>Use here</button>';
+    document.body.appendChild(banner);
+    return banner;
+}
+
+test('yields the session when "open on another computer" appears, and resumes when it clears', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const banner = addUseHereBanner(page.document);
+    page.sync();
+    assert.deepEqual(last(page, 'set_session_yielded'), { yielded: true });
+    assert.deepEqual(last(page, 'report_heartbeat'), { healthy: true, reason: 'other-session' });
+
+    banner.remove();
+    page.sync();
+    assert.deepEqual(last(page, 'set_session_yielded'), { yielded: false });
+});
+
+test('the takeover prompt clicks "Use here" when the user accepts', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const banner = addUseHereBanner(page.document);
+    let useHereClicks = 0;
+    banner.querySelector('button').addEventListener('click', () => { useHereClicks++; });
+    page.sync();
+
+    page.window.__GM_SHOW_TAKEOVER_PROMPT();
+    const modal = page.document.getElementById('gm-takeover-modal');
+    assert.ok(modal, 'prompt is shown');
+    const accept = [...modal.querySelectorAll('button')].find((b) => b.textContent === 'Move session here');
+    click(page.window, accept);
+    assert.equal(useHereClicks, 1);
+    assert.equal(page.document.getElementById('gm-takeover-modal'), null);
+});
+
+test('an ordinary "Use here" button with no takeover text is ignored', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    page.document.body.insertAdjacentHTML('beforeend', '<div><button>Use here</button></div>');
+    page.sync();
+    assert.equal(count(page, 'set_session_yielded'), 0);
+});
+
+// --- Heartbeat ---
+
+test('reports a healthy heartbeat on an idle page', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    page.sync();
+    assert.deepEqual(last(page, 'report_heartbeat'), { healthy: true, reason: null });
+});
+
+test('reports a stalled connection when the reconnect banner is showing', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    page.document.body.insertAdjacentHTML('beforeend', '<div role="alert">Trying to reach your phone…</div>');
+    page.sync();
+    assert.deepEqual(last(page, 'report_heartbeat'), { healthy: false, reason: 'stalled-connection' });
+});
+
+test('never asks for a reload while the user is typing a message', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    page.document.body.insertAdjacentHTML('beforeend',
+        '<div role="alert">Trying to reach your phone…</div><mw-message-compose><textarea>draft</textarea></mw-message-compose>');
+    page.sync();
+    assert.deepEqual(last(page, 'report_heartbeat'), { healthy: true, reason: 'user-busy' });
+});
+
+// --- Link routing ---
+
+test('opens external links in the OS browser instead of the app window', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const event = click(page.window, page.document.getElementById('external'));
+    assert.equal(event.defaultPrevented, true);
+    assert.deepEqual(last(page, 'open_external'), { url: 'https://example.com/page' });
+});
+
+test('window.open sends external URLs to the OS browser', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    assert.equal(page.window.open('https://example.org/x'), null);
+    assert.deepEqual(last(page, 'open_external'), { url: 'https://example.org/x' });
+});
+
+test('ignores non-http links', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    page.document.body.insertAdjacentHTML('beforeend', '<a id="mail" href="mailto:a@example.com" target="_blank">mail</a>');
+    click(page.window, page.document.getElementById('mail'));
+    assert.equal(count(page, 'open_external'), 0);
+});
+
+// --- Keyboard shortcuts ---
+
+test('on Windows and Linux, Ctrl shortcuts open settings and zoom', (t) => {
+    const page = loadPage({ platform: 'Win32' });
+    t.after(page.close);
+    pressKey(page.window, ',', { ctrlKey: true });
+    pressKey(page.window, '=', { ctrlKey: true });
+    pressKey(page.window, '-', { ctrlKey: true });
+    pressKey(page.window, '0', { ctrlKey: true });
+    assert.equal(count(page, 'open_settings'), 1);
+    assert.deepEqual(page.sent('adjust_zoom').map((c) => c.args.action), ['in', 'out', 'reset']);
+});
+
+test('on macOS, settings and zoom shortcuts are left to the native menu', (t) => {
+    const page = loadPage({ platform: 'MacIntel' });
+    t.after(page.close);
+    pressKey(page.window, ',', { metaKey: true });
+    pressKey(page.window, '=', { metaKey: true });
+    assert.equal(count(page, 'open_settings'), 0);
+    assert.equal(count(page, 'adjust_zoom'), 0);
+});
+
+// --- Page chrome ---
+
+test('adds the settings gear next to the account avatar and opens settings on click', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const gear = page.document.getElementById('gm-app-settings');
+    assert.ok(gear, 'gear exists');
+    assert.equal(gear.nextElementSibling.id, 'avatar');
+    click(page.window, gear);
+    assert.equal(count(page, 'open_settings'), 1);
+});
+
+test('reports passkeys as unavailable', async (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    assert.equal(page.window.PublicKeyCredential, undefined);
+});

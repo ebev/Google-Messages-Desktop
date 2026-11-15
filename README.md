@@ -69,6 +69,13 @@ npm install   # if you didn't use the setup script
 npm run dev
 ```
 
+## Tests
+
+```bash
+npm test                      # injected page script (jsdom)
+cd src-tauri && cargo test    # Rust unit tests, incl. command-list sync check
+```
+
 ## Build
 
 For a native (host-architecture) build:

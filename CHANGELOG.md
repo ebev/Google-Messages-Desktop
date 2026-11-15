@@ -5,6 +5,62 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-11-14
+
+### Fixed
+- `cancelAnimationFrame` could cancel an unrelated timer in the page while the
+  app was hidden in the tray.
+- Clearing message notifications also dismissed the "open on another computer"
+  alert on macOS and Linux.
+- A new notification could be dismissed almost immediately when another
+  conversation was already unread.
+- Notifications were cleared several times per read, and repeatedly on Windows
+  while the session was open on another computer.
+- On Windows, a failed WebView2 notification could loop between the page and
+  the backend.
+- An invalid start URL in `settings.json` prevented the app from starting; it
+  now falls back to the default.
+- On macOS and Linux, clicking a notification now opens that conversation
+  instead of only focusing the window.
+- Linux notifications are closed with a D-Bus `CloseNotification` call instead
+  of a replacement notification.
+
+### Changed
+- The injected page script moved from a string in `lib.rs` to
+  `src-tauri/src/init_script.js`; `lib.rs` and `settings.html` were reorganized
+  and duplicated code merged.
+- The sidebar is only scanned while the title reports unread messages, and the
+  "open on another computer" check is debounced.
+- The Settings version badge is read from the app at runtime, and
+  `tauri.conf.json` takes its version from `Cargo.toml`.
+- Removed the unused `frontend/index.html` and `@tauri-apps/api` dependency;
+  generated `src-tauri/gen/schemas` files are no longer tracked.
+
+### Added
+- Tests: `npm test` runs regression tests for the injected script, and
+  `cargo test` covers settings, URL validation and a check that the command
+  list in `lib.rs`, `build.rs` and `capabilities/default.json` stays in sync.
+- GitHub Actions workflow that runs both test suites and compiles the app on
+  macOS, Windows and Linux.
+
+## [1.3.1] - 2026-11-14
+
+### Fixed
+- **Clear desktop notifications & unread badges when read or replied to on phone:**
+  - Observes both `<title>` and sidebar `mws-conversation-list-item` DOM state
+    (including outgoing `"You: ..."` snippets) so stale `(N)` title counts and
+    tray/taskbar/Dock badges clear immediately when messages are read or replied
+    to from your phone while the desktop window is unfocused or in the tray.
+  - Tracks active notifications by conversation tag/ID (including
+    `ServiceWorkerRegistration.showNotification` / `getNotifications`) and
+    dismisses OS notifications on Windows (`OrigNotification.close()`), macOS
+    (`removeDeliveredNotification` / `removeAllDeliveredNotifications`), and
+    Linux D-Bus (`CloseNotification`) when `.close()` is called, a conversation
+    is read, or unread count reaches `0`.
+  - Adds a low-rate `setTimeout` fallback for `requestAnimationFrame` when
+    `document.hidden` is true so Angular flushes phone sync updates while
+    hidden in the tray.
+
 ## [1.3.0] - 2026-11-12
 
 ### Added

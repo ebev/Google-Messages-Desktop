@@ -6,7 +6,7 @@
     <title>Settings</title>
     <style>
       :root {
-        color-scheme: light dark;
+        color-scheme: light;
         --canvas: #f2f3f7;
         --card-bg: #ffffff;
         --card-border: rgba(0, 0, 0, 0.08);
@@ -33,35 +33,9 @@
         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", Roboto, Ubuntu, sans-serif;
       }
 
-      @media (prefers-color-scheme: dark) {
-        :root:not([data-theme="light"]) {
-          --canvas: #131314;
-          --card-bg: #1e1f22;
-          --card-border: rgba(255, 255, 255, 0.08);
-          --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
-          --row-divider: rgba(255, 255, 255, 0.06);
-          --row-hover: rgba(255, 255, 255, 0.025);
-          --fg: #e3e3e3;
-          --muted: #9aa0a6;
-          --section-label: #8e918f;
-          --accent: #8ab4f8;
-          --accent-fg: #082046;
-          --switch-off: #44474e;
-          --seg-bg: #131314;
-          --seg-active-bg: #303238;
-          --seg-active-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
-          --input-bg: #141517;
-          --input-border: rgba(255, 255, 255, 0.14);
-          --btn-bg: #282a2e;
-          --btn-border: rgba(255, 255, 255, 0.12);
-          --btn-hover: #33363b;
-          --footer-bg: rgba(19, 19, 20, 0.88);
-          --danger: #f28b82;
-          --success: #81c995;
-        }
-      }
-
-      :root[data-theme="dark"] {
+      /* Dark palette. `data-scheme` is the resolved light/dark scheme, set by
+         applyScheme() from the saved theme (or the OS setting for "system"). */
+      :root[data-scheme="dark"] {
         color-scheme: dark;
         --canvas: #131314;
         --card-bg: #1e1f22;
@@ -86,10 +60,6 @@
         --footer-bg: rgba(19, 19, 20, 0.88);
         --danger: #f28b82;
         --success: #81c995;
-      }
-
-      :root[data-theme="light"] {
-        color-scheme: light;
       }
 
       *, *::before, *::after {
@@ -467,6 +437,183 @@
         filter: brightness(1.06);
       }
     </style>
+    <script>
+      // Layout: functions first, then state, then startup. This runs in <head>
+      // so the light/dark scheme is resolved before first paint; everything
+      // that touches the form waits for DOMContentLoaded (see init()).
+
+      // --- Functions ---
+      function invoke(cmd, args) {
+        if (window.__TAURI_INTERNALS__) {
+          return window.__TAURI_INTERNALS__.invoke(cmd, args);
+        }
+        return Promise.reject(new Error('Tauri API not available'));
+      }
+
+      function showStatus(text, isError) {
+        if (statusTimer) clearTimeout(statusTimer);
+        els.status.textContent = text;
+        els.status.className = 'status ' + (isError ? 'err' : 'ok');
+        statusTimer = setTimeout(() => {
+          els.status.textContent = '';
+          els.status.className = 'status';
+        }, 2500);
+      }
+
+      function validStartUrl(value) {
+        if (!value) return true;
+        try {
+          const u = new URL(value);
+          return u.protocol === 'https:' || u.protocol === 'http:';
+        } catch (e) {
+          return false;
+        }
+      }
+
+      // Resolves "system" to the OS scheme and exposes the result to the CSS.
+      function applyScheme() {
+        const scheme = theme === 'light' || theme === 'dark' ? theme : (darkQuery.matches ? 'dark' : 'light');
+        root.setAttribute('data-theme', theme);
+        root.setAttribute('data-scheme', scheme);
+      }
+
+      function setTheme(value) {
+        theme = value || 'system';
+        applyScheme();
+        els.themeButtons.forEach((btn) => {
+          btn.classList.toggle('active', btn.getAttribute('data-theme-val') === theme);
+        });
+      }
+
+      function readForm() {
+        const settings = { theme: theme, start_url: els.startUrl.value.trim() || null };
+        TOGGLES.forEach(([id, key]) => {
+          settings[key] = els[id].checked;
+        });
+        return settings;
+      }
+
+      function applyForm(settings) {
+        const values = settings || {};
+        TOGGLES.forEach(([id, key, defaultOn]) => {
+          els[id].checked = defaultOn ? values[key] !== false : !!values[key];
+        });
+        setTheme(values.theme);
+        els.startUrl.value = values.start_url || '';
+      }
+
+      // The version comes from the app itself, so it never needs editing here.
+      async function showVersion() {
+        try {
+          els.appVersion.textContent = 'v' + (await invoke('plugin:app|version'));
+          els.appVersion.hidden = false;
+        } catch (e) {
+          console.error('Failed to read app version:', e);
+        }
+      }
+
+      async function load() {
+        try {
+          applyForm(await invoke('get_settings'));
+        } catch (e) {
+          console.error('Failed to load settings:', e);
+          showStatus('Failed to load settings', true);
+        }
+      }
+
+      async function save() {
+        const settings = readForm();
+        if (!validStartUrl(settings.start_url)) {
+          showStatus('Start URL must be a valid http(s) URL', true);
+          return;
+        }
+        try {
+          await invoke('set_settings', { settings });
+          applyForm(settings);
+          showStatus('Saved', false);
+        } catch (e) {
+          console.error('Failed to save settings:', e);
+          showStatus('Failed to save settings', true);
+        }
+      }
+
+      function closeWindow() {
+        invoke('plugin:window|close', { label: 'settings' }).catch((e) => {
+          console.error('Failed to close window:', e);
+        });
+      }
+
+      function handleKeydown(e) {
+        const mod = e.metaKey || e.ctrlKey;
+        const key = (e.key || '').toLowerCase();
+        if (e.key === 'Escape' || (mod && key === 'w')) {
+          e.preventDefault();
+          closeWindow();
+        } else if ((e.key === 'Enter' && e.target && e.target.tagName === 'INPUT') || (mod && key === 's')) {
+          e.preventDefault();
+          save();
+        }
+      }
+
+      function init() {
+        ['status', 'appVersion', 'startUrl', 'resetUrlBtn', 'saveBtn', 'closeBtn'].concat(TOGGLES.map((t) => t[0])).forEach((id) => {
+          els[id] = document.getElementById(id);
+        });
+        els.themeButtons = document.querySelectorAll('.seg-btn[data-theme-val]');
+
+        // Segmented theme buttons apply & auto-save immediately
+        els.themeButtons.forEach((btn) => {
+          btn.addEventListener('click', () => {
+            setTheme(btn.getAttribute('data-theme-val'));
+            save();
+          });
+        });
+
+        // Clicking anywhere on an interactive toggle row flips its switch & auto-saves
+        document.querySelectorAll('.row[data-toggle-for]').forEach((row) => {
+          row.addEventListener('click', (e) => {
+            if (e.target.closest('label.switch')) return;
+            const input = els[row.getAttribute('data-toggle-for')];
+            if (input) {
+              input.checked = !input.checked;
+              save();
+            }
+          });
+        });
+
+        TOGGLES.forEach(([id]) => els[id].addEventListener('change', save));
+
+        els.resetUrlBtn.addEventListener('click', () => {
+          els.startUrl.value = '';
+          save();
+        });
+        els.saveBtn.addEventListener('click', save);
+        els.closeBtn.addEventListener('click', closeWindow);
+        document.addEventListener('keydown', handleKeydown);
+
+        load();
+        showVersion();
+      }
+
+      // --- State ---
+      // Toggle switches: [element id, settings key, defaults to on when unset].
+      const TOGGLES = [
+        ['launchAtLogin', 'launch_at_login', false],
+        ['startInTray', 'start_in_tray', false],
+        ['showNotifications', 'show_notifications', true],
+        ['backgroundKeepAlive', 'background_keep_alive', true],
+      ];
+      const root = document.documentElement;
+      const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+      const els = {}; // form elements by id, filled in by init()
+      let theme = 'system';
+      let statusTimer = null;
+
+      // --- Startup ---
+      applyScheme();
+      darkQuery.addEventListener('change', applyScheme);
+      document.addEventListener('DOMContentLoaded', init);
+    </script>
   </head>
   <body>
     <main>
@@ -480,7 +627,7 @@
           <div class="app-name">Google Messages</div>
           <div class="app-sub">Desktop wrapper &amp; background listener</div>
         </div>
-        <span class="app-badge">v1.3</span>
+        <span id="appVersion" class="app-badge" hidden></span>
       </div>
 
       <!-- Appearance -->
@@ -504,11 +651,6 @@
               <button type="button" class="seg-btn" data-theme-val="light">Light</button>
               <button type="button" class="seg-btn" data-theme-val="dark">Dark</button>
             </div>
-            <select id="theme" hidden>
-              <option value="system">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
           </div>
         </div>
       </div>
@@ -630,161 +772,5 @@
       </div>
     </footer>
 
-    <script>
-      const launchAtLogin = document.getElementById('launchAtLogin');
-      const startInTray = document.getElementById('startInTray');
-      const showNotifications = document.getElementById('showNotifications');
-      const backgroundKeepAlive = document.getElementById('backgroundKeepAlive');
-      const theme = document.getElementById('theme');
-      const themeButtons = document.querySelectorAll('.seg-btn[data-theme-val]');
-      const startUrl = document.getElementById('startUrl');
-      const resetUrlBtn = document.getElementById('resetUrlBtn');
-      const saveBtn = document.getElementById('saveBtn');
-      const closeBtn = document.getElementById('closeBtn');
-      const status = document.getElementById('status');
-
-      let currentSettings = {};
-      let statusTimer = null;
-
-      function showStatus(text, isError) {
-        if (statusTimer) clearTimeout(statusTimer);
-        status.textContent = text;
-        status.className = 'status ' + (isError ? 'err' : 'ok');
-        statusTimer = setTimeout(() => {
-          status.textContent = '';
-          status.className = 'status';
-        }, 2500);
-      }
-
-      function invoke(cmd, args) {
-        if (window.__TAURI_INTERNALS__) {
-          return window.__TAURI_INTERNALS__.invoke(cmd, args);
-        }
-        return Promise.reject(new Error('Tauri API not available'));
-      }
-
-      function validStartUrl(value) {
-        if (!value) return true;
-        try {
-          const u = new URL(value);
-          return u.protocol === 'https:' || u.protocol === 'http:';
-        } catch (e) {
-          return false;
-        }
-      }
-
-      function syncThemeUI(val) {
-        const normalized = val || 'system';
-        theme.value = normalized;
-        document.documentElement.setAttribute('data-theme', normalized);
-        themeButtons.forEach((btn) => {
-          btn.classList.toggle('active', btn.getAttribute('data-theme-val') === normalized);
-        });
-      }
-
-      function readForm() {
-        return {
-          launch_at_login: launchAtLogin.checked,
-          start_in_tray: startInTray.checked,
-          show_notifications: showNotifications.checked,
-          background_keep_alive: backgroundKeepAlive.checked,
-          theme: theme.value,
-          start_url: startUrl.value.trim() || null,
-        };
-      }
-
-      function applyForm(settings) {
-        currentSettings = settings || {};
-        launchAtLogin.checked = !!currentSettings.launch_at_login;
-        startInTray.checked = !!currentSettings.start_in_tray;
-        showNotifications.checked = !!currentSettings.show_notifications;
-        backgroundKeepAlive.checked = currentSettings.background_keep_alive !== false;
-        syncThemeUI(currentSettings.theme || 'system');
-        startUrl.value = currentSettings.start_url || '';
-      }
-
-      async function load() {
-        try {
-          const settings = await invoke('get_settings');
-          applyForm(settings);
-        } catch (e) {
-          console.error('Failed to load settings:', e);
-          showStatus('Failed to load settings', true);
-        }
-      }
-
-      async function save() {
-        const settings = readForm();
-        if (!validStartUrl(settings.start_url)) {
-          showStatus('Start URL must be a valid http(s) URL', true);
-          return;
-        }
-        try {
-          await invoke('set_settings', { settings });
-          applyForm(settings);
-          showStatus('Saved', false);
-        } catch (e) {
-          console.error('Failed to save settings:', e);
-          showStatus('Failed to save settings', true);
-        }
-      }
-
-      function closeWindow() {
-        invoke('plugin:window|close', { label: 'settings' }).catch((e) => {
-          console.error('Failed to close window:', e);
-        });
-      }
-
-      // Segmented theme buttons apply & auto-save immediately
-      themeButtons.forEach((btn) => {
-        btn.addEventListener('click', () => {
-          syncThemeUI(btn.getAttribute('data-theme-val'));
-          save();
-        });
-      });
-
-      // Clicking anywhere on an interactive toggle row flips its switch & auto-saves
-      document.querySelectorAll('.row[data-toggle-for]').forEach((row) => {
-        row.addEventListener('click', (e) => {
-          if (e.target.closest('label.switch')) return;
-          const id = row.getAttribute('data-toggle-for');
-          const input = document.getElementById(id);
-          if (input) {
-            input.checked = !input.checked;
-            save();
-          }
-        });
-      });
-
-      [launchAtLogin, startInTray, showNotifications, backgroundKeepAlive].forEach((el) => {
-        el.addEventListener('change', save);
-      });
-
-      resetUrlBtn.addEventListener('click', () => {
-        startUrl.value = '';
-        save();
-      });
-
-      saveBtn.addEventListener('click', save);
-      closeBtn.addEventListener('click', closeWindow);
-
-      document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          closeWindow();
-        } else if (e.key === 'Enter' && e.target && e.target.tagName === 'INPUT') {
-          e.preventDefault();
-          save();
-        } else if ((e.metaKey || e.ctrlKey) && (e.key === 'w' || e.key === 'W')) {
-          e.preventDefault();
-          closeWindow();
-        } else if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
-          e.preventDefault();
-          save();
-        }
-      });
-
-      load();
-    </script>
   </body>
 </html>

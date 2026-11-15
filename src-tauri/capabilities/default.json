@@ -24,6 +24,8 @@
     "allow-focus-main-window",
     "allow-adjust-zoom",
     "allow-send-native-notification",
+    "allow-close-native-notification",
+    "allow-clear-native-notifications",
     "allow-report-heartbeat",
     "allow-set-session-yielded",
     "allow-prompt-takeover-session"
