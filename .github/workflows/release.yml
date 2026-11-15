@@ -109,15 +109,10 @@ jobs:
               need rpm "$bundle/rpm" '*.rpm'
               ;;
             windows-cross-latest)
-              # Both arches ship portables named google-messages.exe by rustc;
-              # rename per-arch so x64 and arm64 coexist on the release.
-              archtag=x64
-              case "$TARCH" in *aarch64*) archtag=arm64 ;; esac
-              for pf in $(find "$xbundle" -maxdepth 1 -type f -name 'google-messages.exe' 2>/dev/null || true); do
-                mv "$pf" "$(dirname "$pf")/google-messages-$archtag.exe" 2>/dev/null || true
-              done
+              # Installers only — portable exes are uploaded nowhere: rustc
+              # names them the same for both arches, which collides on the
+              # release. Ship one NSIS installer per arch instead.
               need "nsis installer" "$xbundle/bundle/nsis" '*-setup.exe'
-              need "portable exe" "$xbundle" "google-messages-$archtag.exe"
               ;;
             macos-latest)
               need dmg "$bundle/dmg" '*.dmg'
