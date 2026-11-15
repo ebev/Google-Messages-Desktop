@@ -78,7 +78,7 @@ jobs:
           mkdir -p src-tauri/target/dual
           # makensis -DNAME=value defines must each be ONE shell word (spaces
           # inside the value are fine; splitting them kills the script arg).
-          nsis_args=(-DCI_PRODUCT='"Google Messages"' -DCI_VERSION="$crate_version")
+          nsis_args=(-DCI_PRODUCT='Google Messages' -DCI_VERSION="$crate_version")
           nsis_args+=(-DCI_PAYLOAD_X64="$x64_setup")
           nsis_args+=(-DCI_PAYLOAD_ARM64="$arm64_setup")
           nsis_args+=(-DCI_OUTFILE="src-tauri/target/dual/Google Messages_${crate_version}_x64-arm64-setup.exe")
