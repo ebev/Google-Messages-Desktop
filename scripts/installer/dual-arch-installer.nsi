@@ -31,7 +31,7 @@
   !define CI_OUTFILE "Google Messages_${CI_VERSION}_x64-arm64-setup.exe"
 !endif
 
-Name "${CI_PRODUCT} ${CI_VERSION} (x64 + ARM64)"
+Name "${CI_PRODUCT} v${CI_VERSION} (x64 + ARM64)"
 OutFile "${CI_OUTFILE}"
 RequestExecutionLevel user
 ShowInstDetails show
