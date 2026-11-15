@@ -19,11 +19,7 @@ jobs:
           - os: ubuntu-latest
             targets: deb,rpm
           - os: windows-cross-latest
-            targets: nsis
-            tarch: x86_64-pc-windows-msvc
-          - os: windows-cross-latest
-            targets: nsis
-            tarch: aarch64-pc-windows-msvc
+            targets: dual-nsis
           - os: macos-latest
             targets: dmg
     steps:
@@ -66,10 +62,28 @@ jobs:
         run: npm run tauri build -- -b deb,rpm
       # windows-cross-latest is a Linux container: cargo-xwin links against the
       # MSVC SDK and makensis builds the installer, so no Windows host is needed.
-      # Both x64 and arm64 (Windows-on-ARM) targets cross-compile here.
-      - name: Build (Windows cross, nsis)
+      # One leg builds BOTH arch payloads and wraps them in a single dual-arch
+      # installer (scripts/installer/dual-arch-installer.nsi) that silently runs
+      # the matching Tauri installer on the host — x64 or native ARM64.
+      - name: Build (Windows cross, dual-arch NSIS)
         if: matrix.os == 'windows-cross-latest'
-        run: npm run tauri build -- -b nsis --runner cargo-xwin --target ${{ matrix.tarch }}
+        shell: bash
+        run: |
+          crate_version=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)
+          npm run tauri build -- -b nsis --runner cargo-xwin --target x86_64-pc-windows-msvc 2>&1 | tail -2
+          npm run tauri build -- -b nsis --runner cargo-xwin --target aarch64-pc-windows-msvc 2>&1 | tail -2
+          x64_setup=$(find src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis -maxdepth 1 -type f -name '*-setup.exe' | head -n 1)
+          arm64_setup=$(find src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis -maxdepth 1 -type f -name '*-setup.exe' | head -n 1)
+          [ -n "$x64_setup" ] && [ -n "$arm64_setup" ]
+          mkdir -p src-tauri/target/dual
+          # makensis -DNAME=value defines must each be ONE shell word (spaces
+          # inside the value are fine; splitting them kills the script arg).
+          nsis_args=(-DCI_PRODUCT='"Google Messages"' -DCI_VERSION="$crate_version")
+          nsis_args+=(-DCI_PAYLOAD_X64="$x64_setup")
+          nsis_args+=(-DCI_PAYLOAD_ARM64="$arm64_setup")
+          nsis_args+=(-DCI_OUTFILE="src-tauri/target/dual/Google Messages_${crate_version}_x64-arm64-setup.exe")
+          makensis "${nsis_args[@]}" scripts/installer/dual-arch-installer.nsi
+          ls -la src-tauri/target/dual/
       # Ad-hoc signed (signingIdentity "-" in tauri.conf.json), not notarized.
       - name: Build (macOS dmg)
         if: matrix.os == 'macos-latest'
@@ -81,7 +95,6 @@ jobs:
         shell: bash
         env:
           OS: ${{ matrix.os }}
-          TARCH: ${{ matrix.tarch }}
           REF: ${{ gitea.ref }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           API: https://gitea.eabev.com/api/v1/repos/eric/Google-Messages
@@ -89,8 +102,7 @@ jobs:
           set -euo pipefail
           tag="${REF#refs/tags/}"
           bundle=src-tauri/target/release/bundle
-          xbundle=src-tauri/target/x86_64-pc-windows-msvc/release
-          if [ -n "$TARCH" ]; then xbundle="src-tauri/target/$TARCH/release"; fi
+          dualbundle=src-tauri/target/dual
 
           artifacts=()
           need() {
@@ -111,8 +123,14 @@ jobs:
             windows-cross-latest)
               # Installers only — portable exes are uploaded nowhere: rustc
               # names them the same for both arches, which collides on the
-              # release. Ship one NSIS installer per arch instead.
-              need "nsis installer" "$xbundle/bundle/nsis" '*-setup.exe'
+              # release. The dual-arch installer supersedes the per-arch setup
+              # exes from earlier pipeline versions.
+              need "dual-arch nsis installer" "$dualbundle" '*x64-arm64-setup.exe'
+              legacy_ids=$(curl -sS -H "$auth" "$API/releases/$id/assets" | python3 -c "import json,sys; print('\n'.join(str(a['id']) for a in json.load(sys.stdin) if a.get('name','').endswith(('_x64-setup.exe','_arm64-setup.exe'))))")
+              for aid in $legacy_ids; do
+                code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H "$auth" "$API/releases/$id/assets/$aid")
+                echo "Deleted legacy per-arch asset id $aid (HTTP $code)"
+              done
               ;;
             macos-latest)
               need dmg "$bundle/dmg" '*.dmg'
