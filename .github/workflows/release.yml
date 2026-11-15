@@ -20,6 +20,10 @@ jobs:
             targets: deb,rpm
           - os: windows-cross-latest
             targets: nsis
+            tarch: x86_64-pc-windows-msvc
+          - os: windows-cross-latest
+            targets: nsis
+            tarch: aarch64-pc-windows-msvc
           - os: macos-latest
             targets: dmg
     steps:
@@ -62,9 +66,10 @@ jobs:
         run: npm run tauri build -- -b deb,rpm
       # windows-cross-latest is a Linux container: cargo-xwin links against the
       # MSVC SDK and makensis builds the installer, so no Windows host is needed.
+      # Both x64 and arm64 (Windows-on-ARM) targets cross-compile here.
       - name: Build (Windows cross, nsis)
         if: matrix.os == 'windows-cross-latest'
-        run: npm run tauri build -- -b nsis --runner cargo-xwin --target x86_64-pc-windows-msvc
+        run: npm run tauri build -- -b nsis --runner cargo-xwin --target ${{ matrix.tarch }}
       # Ad-hoc signed (signingIdentity "-" in tauri.conf.json), not notarized.
       - name: Build (macOS dmg)
         if: matrix.os == 'macos-latest'
@@ -76,6 +81,7 @@ jobs:
         shell: bash
         env:
           OS: ${{ matrix.os }}
+          TARCH: ${{ matrix.tarch }}
           REF: ${{ gitea.ref }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           API: https://gitea.eabev.com/api/v1/repos/eric/Google-Messages
@@ -84,6 +90,7 @@ jobs:
           tag="${REF#refs/tags/}"
           bundle=src-tauri/target/release/bundle
           xbundle=src-tauri/target/x86_64-pc-windows-msvc/release
+          if [ -n "$TARCH" ]; then xbundle="src-tauri/target/$TARCH/release"; fi
 
           artifacts=()
           need() {
