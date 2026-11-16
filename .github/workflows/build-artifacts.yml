@@ -89,7 +89,6 @@ jobs:
           [ -e "$1" ] || { echo "No artifacts built for $OS"; exit 1; }
           auth="Authorization: token $TOKEN"
           resp=$(mktemp)
-          assets_json="$(curl -sS -H "$auth" "$API/releases/$id/assets")"
           code=$(curl -sS -o "$resp" -w '%{http_code}' -H "$auth" "$API/releases/tags/$snaptag")
           if [ "$code" = "404" ]; then
             code=$(curl -sS -o "$resp" -w '%{http_code}' -X POST \
