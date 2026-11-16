@@ -426,6 +426,22 @@ test('adds the settings gear next to the account avatar and opens settings on cl
     assert.equal(count(page, 'open_settings'), 1);
 });
 
+test('when signed out, the settings gear sits beside the Sign in button', async (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const { document } = page;
+    // Swap the signed-in corner for the signed-out one, as the welcome page has.
+    document.getElementById('gm-app-settings').remove();
+    document.getElementById('avatar').remove();
+    const switcher = document.createElement('mw-ogbaccountswitcher');
+    switcher.innerHTML = '<button id="signin" class="sign-in">Sign in</button>';
+    document.body.prepend(switcher);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const gear = document.getElementById('gm-app-settings');
+    assert.ok(gear, 'gear exists');
+    assert.equal(gear.nextElementSibling.id, 'signin');
+});
+
 test('reports passkeys as unavailable', async (t) => {
     const page = loadPage();
     t.after(page.close);

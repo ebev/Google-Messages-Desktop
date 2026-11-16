@@ -470,7 +470,9 @@
 
     function findAvatar() {
         const els = document.querySelectorAll(
-            'a[aria-label*="Google Account"], a[href*="accounts.google.com"], a[href*="SignOutOptions"]');
+            'a[aria-label*="Google Account"], a[href*="accounts.google.com"], a[href*="SignOutOptions"], ' +
+            // Signed out, the same corner holds a "Sign in" button instead.
+            'mw-ogbaccountswitcher button, button.sign-in');
         for (let i = 0; i < els.length; i++) {
             const r = els[i].getBoundingClientRect();
             if (r.width > 0 && r.top >= 0 && r.top < 150) return els[i];

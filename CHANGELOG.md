@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answered or dismissed. Replies are sent with a real Enter key press through
   WebView2's DevTools protocol.
 
+### Fixed
+- The settings gear no longer overlaps the "Sign in" button on the signed-out
+  welcome page; it now sits beside it, as it does beside the account avatar.
+
 ### Removed
 - The WebView2 web-notification path on Windows, and the automatic grant of
   the WebView2 notification permission (microphone and camera are still
