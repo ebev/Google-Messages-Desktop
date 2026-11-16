@@ -62,32 +62,6 @@ jobs:
       - name: Build (macOS dmg)
         if: matrix.os == 'macos-latest'
         run: npm run tauri build -- -b dmg
-      - name: Upload artifacts (linux)
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v3
-        with:
-          name: google-messages-linux
-          path: |
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/rpm/*.rpm
-      - name: Upload artifacts (windows)
-        if: matrix.os == 'windows-cross-latest'
-        uses: actions/upload-artifact@v3
-        with:
-          name: google-messages-${{ matrix.tarch }}
-          path: src-tauri/target/${{ matrix.tarch }}/release/bundle/nsis/*-setup.exe
-      - name: Upload artifacts (macos)
-        if: matrix.os == 'macos-latest'
-        uses: actions/upload-artifact@v3
-        with:
-          name: google-messages-macos
-          path: src-tauri/target/release/bundle/dmg/*.dmg
-
-
-      # The gitea artifact upload (upload-artifact@v3) does not produce
-      # downloadable assets on this runner generation ("successfully uploaded"
-      # -> the artifacts API lists zero). Gitea release attachments provenly
-      # work, so post the packages to the release for the built ref instead.
       - name: Post artifacts to the snapshots release
         shell: bash
         env:
@@ -101,24 +75,21 @@ jobs:
           snaptag="v$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)-snapshots"
           case "$OS" in
             ubuntu-latest)
-              base=src-tauri/target/release/bundle
-              files="$base/deb/*.deb $base/rpm/*.rpm"
+              base="src-tauri/target/release/bundle"
+              set -- "$base/deb/"*.deb "$base/rpm/"*.rpm
               ;;
             windows-cross-latest)
-              base=src-tauri/target/$TARCH/release
-              files="$base/bundle/nsis/*-setup.exe"
+              set -- "src-tauri/target/${{ matrix.tarch }}/release/bundle/nsis/"*-setup.exe
               ;;
             macos-latest)
-              base=src-tauri/target/release/bundle
-              files="$base/dmg/*.dmg"
+              set -- "src-tauri/target/release/bundle/dmg/"*.dmg
               ;;
             *) echo "Unknown matrix.os: $OS"; exit 1 ;;
           esac
-          shopt -s nullglob
-          set -- $files
-          [ $# -gt 0 ] || { echo "No artifacts for $OS: $files"; exit 1; }
-          auth="Authorization: token ***"
+          [ -e "$1" ] || { echo "No artifacts built for $OS"; exit 1; }
+          auth="Authorization: token $TOKEN"
           resp=$(mktemp)
+          assets_json="$(curl -sS -H "$auth" "$API/releases/$id/assets")"
           code=$(curl -sS -o "$resp" -w '%{http_code}' -H "$auth" "$API/releases/tags/$snaptag")
           if [ "$code" = "404" ]; then
             code=$(curl -sS -o "$resp" -w '%{http_code}' -X POST \
@@ -138,10 +109,11 @@ jobs:
               ;;
           esac
           id=$(grep -o '"id":[0-9]*' "$resp" | head -n 1 | cut -d: -f2)
-          echo "Using release $id for $snaptag"
+          echo "Using snapshots release $id for $snaptag"
           for f in "$@"; do
             name=$(basename "$f")
-            del_ids=$(curl -sS -H "$auth" "$API/releases/$id/assets" | python3 -c "import json,sys; asset_name=sys.argv[1]; print('\n'.join(str(a['id']) for a in json.load(sys.stdin) if a.get('name')==asset_name))" "$name")
+            assets_json="$(curl -sS -H "$auth" "$API/releases/$id/assets")"
+            del_ids=$(printf '%s' "$assets_json" | python3 -c "import json,sys; asset_name=sys.argv[1]; [print(a['id']) for a in json.load(sys.stdin) if a.get('name')==asset_name]" "$name")
             for aid in $del_ids; do
               dcode=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H "$auth" "$API/releases/$id/assets/$aid")
               echo "Deleted stale asset id $aid (HTTP $dcode)"
