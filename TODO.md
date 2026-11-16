@@ -1,5 +1,69 @@
 # TODO
 
+## v1.5 — Native Windows Toasts & Quick Reply (Windows side) — SPEC, NOT STARTED
+
+Goal: replace WebView2's web `Notification` on Windows with native toast
+notifications sent from Rust, so Windows gets the same reply field, quick-action
+emoji and "Mark as read" button that the macOS/Linux prototype has, and so all
+three platforms go through one notification path.
+
+Items marked **(confirm)** are from memory and must be checked against the
+Windows docs or a real build before relying on them. None of this can be
+compiled on the Mac; it has to be built on Windows or through the CI workflow.
+
+### 1. Rust toast backend (`cfg(windows)`)
+- [ ] **Implement the three platform functions natively:** `send_os_notification`, `close_os_notification` and `clear_os_notifications` in `lib.rs` currently eval into the page (`__gmShowWebviewNotification` etc.). Replace them with a `windows_native` module, mirroring `macos_native`.
+- [ ] **Choose the API:** use the `windows` crate directly (`Windows.UI.Notifications` + `Windows.Data.Xml.Dom`) and build the toast XML by hand. `tauri-winrt-notification` is already in `Cargo.lock` (via `notify-rust`) and would be less code, but it is not known to support text input **(confirm)**; the reply field is the reason for this work, so do not depend on it unless it does.
+- [ ] **Pin the `windows` crate to the version Tauri already pulls in** (0.61 in the current lockfile) so it is not compiled twice, and enable only the features needed (`UI_Notifications`, `Data_Xml_Dom`, `Foundation`, `Foundation_Collections`, plus registry access for item 2).
+- [ ] **Keep sent toasts in a map** keyed by our notification id (like `DELIVERED_NOTIFS` / `LINUX_NOTIFS`). The `Activated` handlers only fire while the `ToastNotification` object is alive **(confirm)**, and the map is also what `close` uses.
+- [ ] **Replace, close, clear:** set `Tag` (a hash of our id, since tags are length-limited **(confirm: 64 chars)**) and `Group` (`messages` or `takeover`). Re-sending the same id replaces the toast. Close with `ToastNotificationManager::History().Remove(tag, group, aumid)`. Clear message toasts with `RemoveGroup("messages", aumid)`, which leaves the takeover toast alone (same rule as macOS/Linux).
+- [ ] **Clear our toasts on quit** (`quit_app`): toasts left in the notification center after the app exits cannot do anything when clicked, because no COM activator is registered (see item 2).
+
+### 2. App identity (AUMID)
+- [ ] **Register an AppUserModelID at startup:** an unpackaged app needs one for toasts to show with the right name and icon, and for buttons to work. Write `HKCU\Software\Classes\AppUserModelId\<aumid>` with `DisplayName` and `IconUri` **(confirm this is enough without a Start Menu shortcut on Windows 10 and 11)**. Doing it at startup covers `npm run dev` as well as installed builds.
+- [ ] **Use the bundle identifier (`com.googleMessages.app`) as the AUMID** and check it matches what the NSIS/MSI installer assigns to its Start Menu shortcut **(confirm)**, so toasts and the taskbar button belong to the same app.
+- [ ] **No background (COM) activation:** not needed, because the app is always running in the tray when a notification fires. Decide explicitly rather than by omission; revisit only if toasts must work after the app has exited.
+
+### 3. Toast content and buttons
+- [ ] **Map `NotificationKind` to toast XML:**
+  - `Plain`: title + body, click opens the window.
+  - `Takeover`: title + body, buttons "Switch Here" and "No" (same as macOS).
+  - `Conversation { quick_action }`: title + body, a text `<input>` with placeholder "Reply…", a "Send" button bound to that input (`hint-inputId`), the quick-action emoji button if configured, and "Mark as read". Toasts allow up to five actions **(confirm)**, so all of these fit.
+- [ ] **Escape title, body and emoji for XML** before building the document; these come from message content.
+- [ ] **Sound and Focus Assist:** use the default toast sound; let Windows apply Focus Assist / Do Not Disturb. No custom handling.
+- [ ] **Out of scope for the first version:** contact avatars, inline images, and per-conversation grouping in the notification center.
+
+### 4. Handling clicks, replies and buttons
+- [ ] **Subscribe to `Activated` on each toast** and cast the args to `ToastActivatedEventArgs`: `Arguments()` identifies the button, `UserInput()` carries the reply text. `UserInput` needs Windows 10 version 1903 or later **(confirm)**; on older builds send the toast without the reply field.
+- [ ] **Route to the existing handlers,** so the page-side logic is shared with macOS/Linux:
+  - body click → `handle_notification_click` (extend its `cfg` to Windows)
+  - reply text / quick emoji → `handle_notification_action(.., NotificationAction::Reply(text))`
+  - "Mark as read" → `NotificationAction::MarkRead`
+  - takeover "Switch Here" → `open_and_prompt_takeover`
+- [ ] **Threading:** the handler runs on a WinRT thread, not the UI thread. `eval_in_main` is safe from there; anything touching windows goes through `run_on_main_thread`.
+- [ ] **Bringing the window forward:** check that `show_main_window` from a toast click actually takes focus. Windows restricts background focus changes, though a toast click normally grants the right **(confirm on a real machine)**.
+- [ ] **Subscribe to `Dismissed`** only to drop the toast from the map; no other behaviour.
+
+### 5. Page script and cleanup
+- [ ] **Remove the WebView2 notification path from `init_script.js`:** `useWebviewNotification`, `OrigNotification`, `requestWebviewNotificationPermission`, the `webviewNotif` branch of `dispatchNotification`, `showWebviewNotification` / `closeWebviewNotification` / `clearWebviewNotifications`, the `fromBackend` guard, and the three `window.__gm*WebviewNotification*` entry points. After this every platform sends `send_native_notification`.
+- [ ] **Stop auto-granting `COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS`** in `grant_media_permissions`; keep microphone and camera.
+- [ ] **`GMNotification.permission` / `requestPermission`** can then always report `granted`.
+- [ ] **Update the tests:** delete the three "on Windows" WebView2 tests in `tests/init_script.test.mjs` and add one asserting Windows now uses the native bridge.
+
+### 6. Verification
+- [ ] **CI:** the `windows-latest` job must compile and pass `cargo test`. This is the only build check available without a Windows machine.
+- [ ] **Manual, on Windows 10 and 11, in dev and from an installed build:**
+  - toast shows the app name and icon
+  - a second message in the same conversation replaces the first toast
+  - reading the conversation on the phone removes its toast; the takeover toast survives a clear
+  - body click opens the right conversation
+  - a typed reply, the emoji button and "Mark as read" each work with the window hidden in the tray
+  - "Show desktop notifications" off sends nothing
+  - quitting the app removes its toasts from the notification center
+- [ ] **Depends on the macOS prototype check:** the page-side reply and mark-as-read logic is shared, so confirm it works against the real Messages page on macOS first.
+
+---
+
 ## v1.3 — Background Listener, Notification Reliability & Session Takeover Protection
 
 ### 1. Background Listener & Anti-Throttling Keep-Alive — DONE

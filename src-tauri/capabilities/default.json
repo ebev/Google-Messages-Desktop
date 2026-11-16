@@ -28,6 +28,8 @@
     "allow-clear-native-notifications",
     "allow-report-heartbeat",
     "allow-set-session-yielded",
-    "allow-prompt-takeover-session"
+    "allow-prompt-takeover-session",
+    "allow-press-enter-key",
+    "allow-log-page-diagnostic"
   ]
 }

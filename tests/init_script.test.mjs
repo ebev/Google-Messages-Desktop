@@ -35,6 +35,7 @@ const PAGE = `<!DOCTYPE html><html><head><title>Messages</title></head><body>
 //   unread         ids of sidebar rows to mark unread before the script runs
 //   notifications  value substituted for the "show notifications" setting
 //   webNotification  a fake window.Notification class (the WebView2 path)
+//   nativeEnter    the app can press a real Return key (as on macOS)
 function loadPage(options = {}) {
     const dom = new JSDOM(PAGE, {
         url: 'https://messages.google.com/web/conversations',
@@ -49,6 +50,11 @@ function loadPage(options = {}) {
             // Copy through JSON so the recorded value is a plain object from this
             // realm rather than the page's (deepEqual compares prototypes).
             calls.push({ cmd, args: args === undefined ? null : JSON.parse(JSON.stringify(args)) });
+            if (cmd === 'press_enter_key' && options.nativeEnter) {
+                const target = window.document.activeElement || window.document.body;
+                target.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+                return Promise.resolve(true);
+            }
             return Promise.resolve(null);
         },
     };
@@ -159,8 +165,8 @@ test('sends web notifications to the native bridge, keyed by tag', (t) => {
     new page.window.Notification('Alice', { body: 'hello', tag: 'conv-1' });
     new page.window.Notification('Bob', { body: 'yo' });
     assert.deepEqual(page.sent('send_native_notification').map((c) => c.args), [
-        { id: 'conv-1', title: 'Alice', body: 'hello', kind: 'message' },
-        { id: 'gm-conv-Bob', title: 'Bob', body: 'yo', kind: 'message' },
+        { id: 'conv-1', title: 'Alice', body: 'hello', kind: 'message', canReply: true },
+        { id: 'gm-conv-Bob', title: 'Bob', body: 'yo', kind: 'message', canReply: true },
     ]);
 });
 
@@ -459,4 +465,152 @@ test('reports passkeys as unavailable', async (t) => {
     const page = loadPage();
     t.after(page.close);
     assert.equal(page.window.PublicKeyCredential, undefined);
+});
+
+// --- Quick reply / mark as read from a notification ---
+
+// Adds a message box and send button that behave like the real ones: sending
+// records the text against whichever conversation is open and empties the box.
+// Clicking a sidebar row "opens" it by marking it selected.
+function addConversationUi(page, { sendWorks = true, enterSends = false, hasButton = true } = {}) {
+    const { document, window } = page;
+    const sentMessages = [];
+    for (const row of document.querySelectorAll('mws-conversation-list-item')) {
+        row.addEventListener('click', () => {
+            for (const other of document.querySelectorAll('mws-conversation-list-item')) other.classList.remove('selected');
+            row.classList.add('selected');
+        });
+    }
+    document.body.insertAdjacentHTML('beforeend',
+        '<mws-message-compose><textarea placeholder="Text message"></textarea>' +
+        '<mws-message-send-button><button data-e2e-send-text-button>Send</button></mws-message-send-button></mws-message-compose>');
+    const box = document.querySelector('mws-message-compose textarea');
+    document.querySelector('[data-e2e-send-text-button]').addEventListener('click', () => {
+        if (!sendWorks) return;
+        const open = document.querySelector('mws-conversation-list-item.selected [data-e2e-conversation-name]');
+        sentMessages.push({ to: open ? open.textContent : null, text: box.value });
+        box.value = '';
+    });
+    const record = () => {
+        const open = document.querySelector('mws-conversation-list-item.selected [data-e2e-conversation-name]');
+        sentMessages.push({ to: open ? open.textContent : null, text: box.value });
+        box.value = '';
+    };
+    box.addEventListener('keydown', (event) => {
+        if (enterSends && event.key === 'Enter' && box.value) record();
+    });
+    if (!hasButton) document.querySelector('mws-message-send-button').remove();
+    return { box, sentMessages, window };
+}
+
+test('a reply from a notification is sent to that conversation', async (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['bob'] });
+    t.after(page.close);
+    const ui = addConversationUi(page);
+    const sent = await page.window.__gmNotificationAction('gm-conv-Bob', 'Bob', 'reply', '  on my way  ');
+    assert.equal(sent, true);
+    assert.deepEqual(ui.sentMessages, [{ to: 'Bob', text: 'on my way' }]);
+    assert.equal(count(page, 'focus_main_window'), 0, 'window stays hidden on success');
+});
+
+test('a reply switches away from a different open conversation first', async (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['bob'] });
+    t.after(page.close);
+    const ui = addConversationUi(page);
+    click(page.window, page.document.getElementById('alice'));
+    await page.window.__gmNotificationAction('gm-conv-Bob', 'Bob', 'reply', 'hi');
+    assert.deepEqual(ui.sentMessages, [{ to: 'Bob', text: 'hi' }]);
+});
+
+test('a reply is not sent when two conversations share the name', async (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['bob'] });
+    t.after(page.close);
+    page.document.getElementById('alice').querySelector('[data-e2e-conversation-name]').textContent = 'Bob';
+    const ui = addConversationUi(page);
+    const sent = await page.window.__gmNotificationAction('gm-conv-Bob', 'Bob', 'reply', 'hi');
+    assert.equal(sent, false);
+    assert.deepEqual(ui.sentMessages, []);
+    assert.equal(ui.box.value, '');
+    assert.equal(count(page, 'focus_main_window'), 1, 'window is shown so the user can reply by hand');
+    assert.equal(last(page, 'send_native_notification').title, 'Reply not sent');
+});
+
+test('a reply is not sent when the conversation is not in the sidebar', async (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const ui = addConversationUi(page);
+    assert.equal(await page.window.__gmNotificationAction('x', 'Nobody', 'reply', 'hi'), false);
+    assert.deepEqual(ui.sentMessages, []);
+});
+
+test('a reply never overwrites or sends a draft already in the message box', async (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['bob'] });
+    t.after(page.close);
+    const ui = addConversationUi(page);
+    ui.box.value = 'half-written draft';
+    assert.equal(await page.window.__gmNotificationAction('gm-conv-Bob', 'Bob', 'reply', 'hi'), false);
+    assert.deepEqual(ui.sentMessages, []);
+    assert.equal(ui.box.value, 'half-written draft');
+});
+
+test('if sending does not go through, the text stays as a draft and the window is shown', async (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['bob'] });
+    t.after(page.close);
+    const ui = addConversationUi(page, { sendWorks: false });
+    assert.equal(await page.window.__gmNotificationAction('gm-conv-Bob', 'Bob', 'reply', 'hi'), false);
+    assert.equal(ui.box.value, 'hi');
+    assert.equal(count(page, 'focus_main_window'), 1);
+});
+
+test('a reply falls back to the Enter key when clicking Send does nothing', async (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['bob'] });
+    t.after(page.close);
+    const ui = addConversationUi(page, { sendWorks: false, enterSends: true });
+    assert.equal(await page.window.__gmNotificationAction('gm-conv-Bob', 'Bob', 'reply', 'hi'), true);
+    assert.deepEqual(ui.sentMessages, [{ to: 'Bob', text: 'hi' }]);
+    assert.equal(count(page, 'focus_main_window'), 0);
+});
+
+test('a reply is sent with a real Return key press where the app supports it', async (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['bob'], nativeEnter: true });
+    t.after(page.close);
+    const ui = addConversationUi(page, { enterSends: true });
+    assert.equal(await page.window.__gmNotificationAction('gm-conv-Bob', 'Bob', 'reply', 'hi'), true);
+    assert.deepEqual(ui.sentMessages, [{ to: 'Bob', text: 'hi' }]);
+    assert.equal(count(page, 'press_enter_key'), 1);
+    assert.equal(count(page, 'focus_main_window'), 0);
+});
+
+test('a reply is sent with the Enter key when there is no Send button', async (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['bob'] });
+    t.after(page.close);
+    const ui = addConversationUi(page, { hasButton: false, enterSends: true });
+    assert.equal(await page.window.__gmNotificationAction('gm-conv-Bob', 'Bob', 'reply', 'hi'), true);
+    assert.deepEqual(ui.sentMessages, [{ to: 'Bob', text: 'hi' }]);
+});
+
+test('a reply is sent once when both the Send button and Enter work', async (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['bob'] });
+    t.after(page.close);
+    const ui = addConversationUi(page, { enterSends: true });
+    assert.equal(await page.window.__gmNotificationAction('gm-conv-Bob', 'Bob', 'reply', 'hi'), true);
+    assert.deepEqual(ui.sentMessages, [{ to: 'Bob', text: 'hi' }]);
+});
+
+test('mark as read opens the conversation without sending anything', async (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['bob'] });
+    t.after(page.close);
+    const ui = addConversationUi(page);
+    assert.equal(await page.window.__gmNotificationAction('gm-conv-Bob', 'Bob', 'read', ''), true);
+    assert.ok(page.document.getElementById('bob').classList.contains('selected'));
+    assert.deepEqual(ui.sentMessages, []);
+});
+
+test('reply buttons are only offered when the title matches exactly one conversation', (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['bob'] });
+    t.after(page.close);
+    new page.window.Notification('Bob', { body: 'yo' });
+    assert.equal(last(page, 'send_native_notification').canReply, true);
+    new page.window.Notification('Someone in a group', { body: 'hi' });
+    assert.equal(last(page, 'send_native_notification').canReply, false);
 });

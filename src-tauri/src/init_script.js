@@ -161,6 +161,14 @@
         return /^You\s*:/i.test(snippet);
     }
 
+    function isConversationRowSelected(el) {
+        return !!(
+            el.classList && el.classList.contains('selected') ||
+            el.getAttribute('aria-selected') === 'true' ||
+            el.querySelector('.selected, [aria-selected="true"]')
+        );
+    }
+
     function isConversationItemUnread(el) {
         if (!el) return false;
         if (isOutgoingSnippet(getConversationSnippet(el))) {
@@ -201,11 +209,7 @@
             const title = getConversationTitle(el);
             const snip = getConversationSnippet(el);
             if (title) allTitles.add(title);
-            const isSelected = !!(
-                el.classList && el.classList.contains('selected') ||
-                el.getAttribute('aria-selected') === 'true' ||
-                el.querySelector('.selected, [aria-selected="true"]')
-            );
+            const isSelected = isConversationRowSelected(el);
             if ((i === 0 || isSelected) && isOutgoingSnippet(snip)) {
                 topOrSelectedRepliedByYou = true;
             }
@@ -871,7 +875,10 @@
             id: id,
             title: normTitle,
             body: normBody,
-            kind: effKind
+            kind: effKind,
+            // Reply / quick action / mark-as-read buttons are only offered when
+            // the title identifies exactly one conversation in the sidebar.
+            canReply: effKind === 'message' && findConversationRows(normTitle).length === 1
         });
         return stub;
     }
@@ -937,6 +944,229 @@
             window.ServiceWorkerRegistration.prototype.showNotification = swShowNotification;
             window.ServiceWorkerRegistration.prototype.getNotifications = swGetNotifications;
         }
+    }
+
+    // --- Quick reply / mark as read from a notification ---
+    // Google Messages has no API for this, so these drive the page: open the
+    // conversation, then type and send. Nothing is typed until the open
+    // conversation is confirmed to be the one the notification was for; on
+    // any doubt the action is abandoned and the window is shown instead.
+    function waitFor(check, timeoutMs) {
+        return new Promise(function (resolve) {
+            const deadline = Date.now() + timeoutMs;
+            (function poll() {
+                let result = null;
+                try { result = check(); } catch (_) {}
+                if (result) return resolve(result);
+                if (Date.now() >= deadline) return resolve(null);
+                setTimeout(poll, 100);
+            })();
+        });
+    }
+
+    function findConversationRows(title) {
+        const rows = [];
+        if (!title) return rows;
+        const items = document.querySelectorAll('mws-conversation-list-item');
+        for (let i = 0; i < items.length; i++) {
+            if (getConversationTitle(items[i]) === title) rows.push(items[i]);
+        }
+        return rows;
+    }
+
+    function conversationRowLink(row) {
+        return row.querySelector('a[href*="/web/conversations/"]');
+    }
+
+    // True once the page is showing this row's conversation: the URL matches
+    // the row's link, or the row is marked selected.
+    function isConversationOpen(row) {
+        const link = conversationRowLink(row);
+        if (link) {
+            const u = parseUrl(link.getAttribute('href'));
+            if (u && u.pathname === location.pathname) return true;
+        }
+        return isConversationRowSelected(row);
+    }
+
+    function findComposeBox() {
+        return queryFirst(COMPOSE_BOX_SELECTORS, isElementVisible);
+    }
+
+    function composeText(box) {
+        return (box.value !== undefined ? box.value : box.textContent) || '';
+    }
+
+    // Sets the text the way typing would, so the page's framework notices.
+    function setComposeText(box, text) {
+        box.focus();
+        if (box.value !== undefined) {
+            const proto = box.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+            setter.call(box, text);
+        } else {
+            box.textContent = text;
+        }
+        const input = typeof window.InputEvent === 'function'
+            ? new window.InputEvent('input', { bubbles: true, inputType: 'insertText', data: text })
+            : new Event('input', { bubbles: true });
+        box.dispatchEvent(input);
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    // Presses Enter in the message box, which is how the page sends by keyboard.
+    function pressEnter(box) {
+        box.focus();
+        ['keydown', 'keypress', 'keyup'].forEach(function (type) {
+            box.dispatchEvent(new KeyboardEvent(type, {
+                key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
+            }));
+        });
+    }
+
+    // Resolves to true once the page has emptied the box, which it does when
+    // it has taken the message.
+    function waitForSent(box, timeoutMs) {
+        return waitFor(function () { return !composeText(box).trim(); }, timeoutMs);
+    }
+
+    // Asks the app for a real Return key press in this window, which the page
+    // treats exactly like the user's own. Resolves to false where the app
+    // cannot do that.
+    function pressEnterNatively(box) {
+        box.focus();
+        return invoke('press_enter_key').then(
+            function (pressed) { return pressed === true; },
+            function () { return false; }
+        );
+    }
+
+    // Sends what is in the message box, trying one way after another until the
+    // page empties the box: a real Return key press, the Send button, a
+    // simulated Return, and last a real Return with the window showing. Each
+    // attempt runs only while the box still holds the text, so the message
+    // cannot go out twice.
+    function sendComposedMessage(box) {
+        const attempts = [
+            function () { return pressEnterNatively(box); },
+            function () {
+                return waitFor(function () { return findSendButton(box); }, SEND_STEP_TIMEOUT_MS).then(function (btn) {
+                    if (btn) btn.click();
+                    return !!btn;
+                });
+            },
+            function () { pressEnter(box); return true; },
+            function () {
+                focusAppWindow();
+                return waitFor(function () { return document.hasFocus(); }, SEND_STEP_TIMEOUT_MS).then(function () {
+                    return pressEnterNatively(box);
+                });
+            }
+        ];
+        function attempt(i) {
+            if (!composeText(box).trim()) return Promise.resolve(true);
+            if (i >= attempts.length) return Promise.resolve(false);
+            return Promise.resolve(attempts[i]()).then(function (tried) {
+                if (!tried) return attempt(i + 1);
+                return waitForSent(box, SEND_STEP_TIMEOUT_MS).then(function (sent) {
+                    return sent ? true : attempt(i + 1);
+                });
+            });
+        }
+        return attempt(0);
+    }
+
+    // A short description of the message box and the buttons around it, for
+    // the app's debug log. It carries no message text.
+    function describeComposeArea(box) {
+        const scope = (box.closest && box.closest('mws-message-compose, mw-message-compose')) || document;
+        const buttons = [];
+        const found = scope.querySelectorAll('button');
+        for (let i = 0; i < found.length && i < 12; i++) {
+            const b = found[i];
+            buttons.push('<button aria-label="' + (b.getAttribute('aria-label') || '') + '" class="' + (b.className || '') + '"' +
+                (b.disabled || b.getAttribute('aria-disabled') === 'true' ? ' disabled' : '') + '>');
+        }
+        return ('send failed: box=' + box.tagName + ' focused=' + (document.activeElement === box) +
+            ' pageFocus=' + document.hasFocus() + ' visibility=' + document.visibilityState +
+            ' scope=' + (scope === document ? 'document' : scope.tagName) + ' buttons=' + buttons.join(' ')).slice(0, 1500);
+    }
+
+    function findSendButton(box) {
+        const scope = (box.closest && box.closest('mws-message-compose, mw-message-compose')) || document;
+        for (let i = 0; i < SEND_BUTTON_SELECTORS.length; i++) {
+            const btn = scope.querySelector(SEND_BUTTON_SELECTORS[i]);
+            if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') return btn;
+        }
+        return null;
+    }
+
+    // Opens the one conversation with this title and resolves to its sidebar
+    // row once the page is showing it, or to null if that cannot be confirmed
+    // (no row, several rows with the same name, or the page never switched).
+    function openConversationByTitle(title) {
+        const rows = findConversationRows(title);
+        if (rows.length !== 1) return Promise.resolve(null);
+        const row = rows[0];
+        if (!isConversationOpen(row)) {
+            (conversationRowLink(row) || row).click();
+        }
+        return waitFor(function () {
+            // Re-check the title too: the list can re-render while we wait.
+            return isConversationOpen(row) && getConversationTitle(row) === title ? row : null;
+        }, ACTION_TIMEOUT_MS);
+    }
+
+    // Tells the user an action from a notification did not go through: shows
+    // the window and posts a notification carrying the unsent text.
+    function reportActionFailure(title, text, reason) {
+        console.warn('[gm] notification action failed:', reason);
+        focusAppWindow();
+        if (text) {
+            dispatchNotification('Reply not sent', 'To ' + title + ': ' + text, 'message', { tag: 'gm-reply-failed' });
+        }
+        return false;
+    }
+
+    // Resolves to true if the message was sent.
+    function replyToConversation(title, text) {
+        const message = String(text || '').trim();
+        if (!message) return Promise.resolve(false);
+        return openConversationByTitle(title).then(function (row) {
+            if (!row) return reportActionFailure(title, message, 'conversation not found or not confirmed');
+            return waitFor(findComposeBox, ACTION_TIMEOUT_MS).then(function (box) {
+                if (!box) return reportActionFailure(title, message, 'no message box');
+                // Never overwrite or send a draft the user already started.
+                if (composeText(box).trim()) return reportActionFailure(title, message, 'message box already has a draft');
+                setComposeText(box, message);
+                return sendComposedMessage(box).then(function (sent) {
+                    if (sent) return true;
+                    // The text stays in the box as a draft; the window is
+                    // already showing from the last attempt.
+                    console.warn('[gm] notification action failed: message box did not clear after send');
+                    send('log_page_diagnostic', { message: describeComposeArea(box) });
+                    return false;
+                });
+            });
+        });
+    }
+
+    // Opening the conversation is what marks it read. Resolves to true if it opened.
+    function markConversationRead(title) {
+        return openConversationByTitle(title).then(function (row) {
+            if (!row) return reportActionFailure(title, '', 'conversation not found or not confirmed');
+            scheduleBadgeSync();
+            return true;
+        });
+    }
+
+    // Called from Rust when a notification's reply field or action button is
+    // used. `action` is 'reply' (with text) or 'read'.
+    function handleNotificationAction(id, title, action, text) {
+        activeNotifications.delete(id);
+        if (action === 'reply') return replyToConversation(title, text);
+        if (action === 'read') return markConversationRead(title);
+        return Promise.resolve(false);
     }
 
     // --- Background requestAnimationFrame ---
@@ -1233,6 +1463,21 @@
         'mws-search-box input',
         'input[type="search"]'
     ];
+    const COMPOSE_BOX_SELECTORS = [
+        'mws-message-compose textarea',
+        'mw-message-compose textarea',
+        '[data-e2e-message-input-box]',
+        'textarea[placeholder*="message" i]'
+    ];
+    const SEND_BUTTON_SELECTORS = [
+        '[data-e2e-send-text-button]',
+        'mws-message-send-button button',
+        'button[aria-label*="Send" i]'
+    ];
+    // How long each step of a notification action may take before giving up.
+    const ACTION_TIMEOUT_MS = 3000;
+    // How long each way of sending gets before the next one is tried.
+    const SEND_STEP_TIMEOUT_MS = 1500;
     const SEARCH_BUTTON_SELECTORS = [
         'button[aria-label*="Search" i]',
         '[data-e2e-search-button]',
@@ -1285,6 +1530,7 @@
     window.__gmCloseWebviewNotification = closeWebviewNotification;
     window.__gmClearWebviewNotifications = clearWebviewNotifications;
     window.__gmNativeNotificationClicked = nativeNotificationClicked;
+    window.__gmNotificationAction = handleNotificationAction;
     window.__GM_SHOW_TAKEOVER_PROMPT = showTakeoverPrompt;
     window.__gmHeartbeat = heartbeat;
 

@@ -49,6 +49,13 @@ const TAKEOVER_NOTIFICATION_ID: &str = "gm-takeover";
 const DEFAULT_START_URL: &str = "https://messages.google.com/web/";
 const MESSAGES_HOST: &str = "messages.google.com";
 
+// Quick-action emoji offered on message notifications until the user picks
+// another (or turns it off) in Settings.
+const DEFAULT_QUICK_ACTION: &str = "👍";
+// Upper bound on the stored quick action, in bytes: room for any single emoji
+// (including multi-part ones), not for arbitrary text.
+const MAX_QUICK_ACTION_BYTES: usize = 32;
+
 // Main window geometry (logical pixels): size used until one is remembered,
 // and the minimum the window can be resized (or restored) to.
 const DEFAULT_MAIN_SIZE: (f64, f64) = (1100.0, 780.0);
@@ -124,6 +131,27 @@ static LINUX_NOTIFS: OnceLock<std::sync::Mutex<LinuxNotifMap>> = OnceLock::new()
 #[cfg(target_os = "linux")]
 type LinuxNotifMap = std::collections::HashMap<String, notify_rust::NotificationHandle>;
 
+// What an OS notification is for, which decides the buttons it offers.
+#[derive(Clone, Debug, PartialEq)]
+enum NotificationKind {
+    // "Open on another computer": offers to move the session here.
+    Takeover,
+    // A message from one identifiable conversation: offers a reply field,
+    // "mark as read", and the quick-action emoji if one is configured.
+    Conversation { quick_action: Option<String> },
+    // Anything else: no buttons, clicking opens the window.
+    Plain,
+}
+
+// Something the user did from a conversation notification without opening
+// the window.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+enum NotificationAction {
+    // Send this text to the conversation (typed reply or quick-action emoji).
+    Reply(String),
+    MarkRead,
+}
+
 // Decoded icon pixels: (RGBA bytes, width, height).
 type IconData = (Vec<u8>, u32, u32);
 
@@ -144,6 +172,9 @@ struct Settings {
     background_keep_alive: bool,
     /// UI theme override: "system", "light", or "dark".
     theme: Option<String>,
+    /// Emoji sent by the quick-action button on message notifications; empty
+    /// turns the button off.
+    quick_action: String,
     /// Remembered window geometry for the main webview.
     main_window_size: Option<WindowSize>,
     /// Mirrored copy of the autostart plugin state so the settings page can show it.
@@ -161,6 +192,7 @@ impl Default for Settings {
             show_notifications: true,
             background_keep_alive: true,
             theme: None,
+            quick_action: DEFAULT_QUICK_ACTION.to_string(),
             main_window_size: None,
             launch_at_login: false,
         }
@@ -472,6 +504,34 @@ fn is_takeover_notification(id: &str) -> bool {
     id.starts_with(TAKEOVER_NOTIFICATION_ID)
 }
 
+// Carries out a reply or mark-as-read chosen on a notification by handing it
+// to the page script, which drives the Messages UI. The window stays where it
+// is; the script shows it only if the action cannot be completed.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn handle_notification_action(
+    app: &tauri::AppHandle,
+    id: &str,
+    title: &str,
+    action: NotificationAction,
+) {
+    let (name, text) = match action {
+        NotificationAction::Reply(text) => ("reply", text),
+        NotificationAction::MarkRead => ("read", String::new()),
+    };
+    if let (Ok(id), Ok(title), Ok(text)) = (
+        serde_json::to_string(id),
+        serde_json::to_string(title),
+        serde_json::to_string(&text),
+    ) {
+        eval_in_main(
+            app,
+            &format!(
+                "window.__gmNotificationAction && window.__gmNotificationAction({id}, {title}, \"{name}\", {text});"
+            ),
+        );
+    }
+}
+
 // Handles a click on one of our OS notifications: the takeover notification
 // opens the "move session here?" prompt; a message notification shows the
 // window and hands the click to the page, which runs the web app's own click
@@ -600,7 +660,7 @@ fn send_os_notification(
     id: String,
     title: String,
     body: String,
-    is_takeover: bool,
+    kind: NotificationKind,
 ) {
     let app = app.clone();
     std::thread::spawn(move || {
@@ -614,9 +674,20 @@ fn send_os_notification(
         if let Some(existing_id) = replaced_id {
             n.id(existing_id);
         }
+        // Buttons. (The freedesktop spec has no text field, so there is no
+        // typed reply here; desktops usually show about three buttons.)
         n.action("default", "Open");
-        if is_takeover {
-            n.action("use_here", "Switch Here").action("no", "No");
+        match &kind {
+            NotificationKind::Takeover => {
+                n.action("use_here", "Switch Here").action("no", "No");
+            }
+            NotificationKind::Conversation { quick_action } => {
+                if let Some(emoji) = quick_action {
+                    n.action("quick", emoji);
+                }
+                n.action("read", "Mark as read");
+            }
+            NotificationKind::Plain => {}
         }
         let Ok(handle) = n.show() else {
             return;
@@ -638,8 +709,28 @@ fn send_os_notification(
         // Blocks until the notification is clicked or closed.
         let _ = notify_rust::handle_action(dbus_id, |response: &notify_rust::ActionResponse| {
             if let notify_rust::ActionResponse::Custom(action) = response {
-                if matches!(*action, "default" | "use_here") {
-                    handle_notification_click(&app, &id, is_takeover);
+                let quick_action = match &kind {
+                    NotificationKind::Conversation { quick_action } => quick_action.clone(),
+                    _ => None,
+                };
+                match *action {
+                    "default" | "use_here" => {
+                        handle_notification_click(&app, &id, kind == NotificationKind::Takeover)
+                    }
+                    "quick" => {
+                        if let Some(emoji) = quick_action {
+                            handle_notification_action(
+                                &app,
+                                &id,
+                                &title,
+                                NotificationAction::Reply(emoji),
+                            );
+                        }
+                    }
+                    "read" => {
+                        handle_notification_action(&app, &id, &title, NotificationAction::MarkRead)
+                    }
+                    _ => {}
                 }
             }
         });
@@ -681,14 +772,14 @@ fn send_os_notification(
     id: String,
     title: String,
     body: String,
-    is_takeover: bool,
+    kind: NotificationKind,
 ) {
     if let (Ok(i), Ok(t), Ok(b)) = (
         serde_json::to_string(&id),
         serde_json::to_string(&title),
         serde_json::to_string(&body),
     ) {
-        let kind = if is_takeover {
+        let kind = if kind == NotificationKind::Takeover {
             "\"takeover\""
         } else {
             "\"message\""
@@ -1205,6 +1296,11 @@ fn set_settings(app: tauri::AppHandle, mut settings: Settings) {
         .start_url
         .filter(|url| parse_start_url(url).is_some());
 
+    settings.quick_action = settings.quick_action.trim().to_string();
+    if settings.quick_action.len() > MAX_QUICK_ACTION_BYTES {
+        settings.quick_action = DEFAULT_QUICK_ACTION.to_string();
+    }
+
     // Keep the OS autostart entry in sync with the persisted launch-at-login flag.
     let mgr = app.autolaunch();
     let enabled = mgr.is_enabled().unwrap_or(false);
@@ -1252,6 +1348,31 @@ fn focus_main_window(app: tauri::AppHandle) {
     show_main_window(&app);
 }
 
+// Presses the Return key in the main window's page as a real key press, so
+// the page sends the message a notification reply has typed into its message
+// box. The page ignores key presses and clicks simulated from script. Returns
+// false where this is not implemented, and the page falls back to simulating.
+#[tauri::command]
+fn press_enter_key(app: tauri::AppHandle) -> bool {
+    ipc_log!("press_enter_key invoked");
+    #[cfg(target_os = "macos")]
+    {
+        main_window(&app).is_some_and(|window| macos_native::press_return(&window))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        false
+    }
+}
+
+// Lets the page script write a line to the debug log (debug builds only).
+#[tauri::command]
+fn log_page_diagnostic(message: String) {
+    ipc_log!("page: {message}");
+    let _ = message;
+}
+
 #[tauri::command]
 fn prompt_takeover_session(app: tauri::AppHandle) {
     ipc_log!("prompt_takeover_session invoked");
@@ -1282,7 +1403,7 @@ fn set_session_yielded(app: tauri::AppHandle, yielded: bool) {
                     format!("{APP_NAME} is open on another computer"),
                     "Click to open and move the session here, or ignore to let the app sleep."
                         .to_string(),
-                    true,
+                    NotificationKind::Takeover,
                 );
             }
         }
@@ -1298,12 +1419,23 @@ fn send_native_notification(
     title: String,
     body: String,
     kind: String,
+    can_reply: Option<bool>,
 ) {
-    ipc_log!("send_native_notification(id={id}, kind={kind}, title={title})");
+    ipc_log!(
+        "send_native_notification(id={id}, kind={kind}, can_reply={can_reply:?}, title={title})"
+    );
     if !SHOW_NOTIFICATIONS.load(Ordering::Relaxed) {
         return;
     }
-    send_os_notification(&app, id, title, body, kind == "takeover");
+    let kind = if kind == "takeover" {
+        NotificationKind::Takeover
+    } else if can_reply == Some(true) {
+        let quick_action = Some(load_settings(&app).quick_action).filter(|emoji| !emoji.is_empty());
+        NotificationKind::Conversation { quick_action }
+    } else {
+        NotificationKind::Plain
+    };
+    send_os_notification(&app, id, title, body, kind);
 }
 
 #[tauri::command]
@@ -1530,7 +1662,9 @@ pub fn run() {
             clear_native_notifications,
             report_heartbeat,
             set_session_yielded,
-            prompt_takeover_session
+            prompt_takeover_session,
+            press_enter_key,
+            log_page_diagnostic
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1546,15 +1680,26 @@ pub fn run() {
 #[allow(deprecated)]
 mod macos_native {
     use objc2::{
-        define_class, msg_send, rc::Retained, runtime::ProtocolObject, DefinedClass,
-        MainThreadMarker, MainThreadOnly,
+        class, define_class, msg_send,
+        rc::Retained,
+        runtime::{AnyObject, ProtocolObject},
+        DefinedClass, MainThreadMarker, MainThreadOnly,
     };
     use objc2_foundation::{
-        ns_string, NSActivityOptions, NSObject, NSObjectProtocol, NSProcessInfo, NSString,
-        NSUserNotification, NSUserNotificationActivationType, NSUserNotificationCenter,
-        NSUserNotificationCenterDelegate, NSUserNotificationDefaultSoundName,
+        ns_string, NSActivityOptions, NSArray, NSObject, NSObjectProtocol, NSPoint, NSProcessInfo,
+        NSString, NSUserNotification, NSUserNotificationAction, NSUserNotificationActivationType,
+        NSUserNotificationCenter, NSUserNotificationCenterDelegate,
+        NSUserNotificationDefaultSoundName,
     };
     use std::cell::RefCell;
+
+    use crate::{NotificationAction, NotificationKind};
+
+    // Identifiers of the extra buttons on a conversation notification. The
+    // quick action carries its emoji after the prefix, so handling a click
+    // needs no lookup of what was configured when the notification was sent.
+    const QUICK_ACTION_PREFIX: &str = "gm-quick:";
+    const MARK_READ_ACTION_ID: &str = "gm-read";
 
     struct GmNotificationDelegateIvars {
         app: tauri::AppHandle,
@@ -1581,18 +1726,30 @@ mod macos_native {
                     .map(|s| s.to_string())
                     .unwrap_or_default();
                 let activation = notification.activationType();
+                ipc_log!("notification activated: id={id} type={}", activation.0);
                 center.removeDeliveredNotification(notification);
                 DELIVERED_NOTIFS.with(|slot| slot.borrow_mut().remove(&id));
+                let app = &self.ivars().app;
+
+                if activation == NSUserNotificationActivationType::Replied
+                    || activation == NSUserNotificationActivationType::AdditionalActionClicked
+                {
+                    let title = notification
+                        .title()
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    if let Some(action) = Self::chosen_action(notification, activation) {
+                        crate::handle_notification_action(app, &id, &title, action);
+                    }
+                    return;
+                }
+
                 let clicked = activation == NSUserNotificationActivationType::ContentsClicked
                     || activation == NSUserNotificationActivationType::ActionButtonClicked;
                 if !clicked {
                     return;
                 }
-                crate::handle_notification_click(
-                    &self.ivars().app,
-                    &id,
-                    crate::is_takeover_notification(&id),
-                );
+                crate::handle_notification_click(app, &id, crate::is_takeover_notification(&id));
             }
 
             #[unsafe(method(userNotificationCenter:shouldPresentNotification:))]
@@ -1607,6 +1764,30 @@ mod macos_native {
     );
 
     impl GmNotificationDelegate {
+        // What the user chose on a conversation notification: text typed into
+        // the reply field, or one of the extra buttons.
+        #[allow(deprecated)]
+        fn chosen_action(
+            notification: &NSUserNotification,
+            activation: NSUserNotificationActivationType,
+        ) -> Option<NotificationAction> {
+            if activation == NSUserNotificationActivationType::Replied {
+                let text = notification.response()?.string().to_string();
+                return Some(NotificationAction::Reply(text));
+            }
+            let action_id = notification
+                .additionalActivationAction()?
+                .identifier()?
+                .to_string();
+            if let Some(emoji) = action_id.strip_prefix(QUICK_ACTION_PREFIX) {
+                Some(NotificationAction::Reply(emoji.to_string()))
+            } else if action_id == MARK_READ_ACTION_ID {
+                Some(NotificationAction::MarkRead)
+            } else {
+                None
+            }
+        }
+
         fn new(mtm: MainThreadMarker, app: tauri::AppHandle) -> Retained<Self> {
             let delegate = mtm
                 .alloc::<GmNotificationDelegate>()
@@ -1671,7 +1852,7 @@ mod macos_native {
         id: String,
         title: String,
         body: String,
-        is_takeover: bool,
+        kind: NotificationKind,
     ) {
         let _ = app.run_on_main_thread(move || {
             #[allow(deprecated)]
@@ -1693,10 +1874,27 @@ mod macos_native {
                 unsafe {
                     notif.setSoundName(Some(NSUserNotificationDefaultSoundName));
                 }
-                if is_takeover {
-                    notif.setHasActionButton(true);
-                    notif.setActionButtonTitle(ns_string!("Switch Here"));
-                    notif.setOtherButtonTitle(ns_string!("No"));
+                match &kind {
+                    NotificationKind::Takeover => {
+                        notif.setHasActionButton(true);
+                        notif.setActionButtonTitle(ns_string!("Switch Here"));
+                        notif.setOtherButtonTitle(ns_string!("No"));
+                    }
+                    NotificationKind::Conversation { quick_action } => {
+                        // A text field to reply in place, plus extra buttons.
+                        notif.setHasReplyButton(true);
+                        notif.setResponsePlaceholder(Some(ns_string!("Reply…")));
+                        let mut actions = Vec::new();
+                        if let Some(emoji) = quick_action {
+                            actions.push(notification_action(
+                                &format!("{QUICK_ACTION_PREFIX}{emoji}"),
+                                &format!("Send {emoji}"),
+                            ));
+                        }
+                        actions.push(notification_action(MARK_READ_ACTION_ID, "Mark as Read"));
+                        notif.setAdditionalActions(Some(&NSArray::from_retained_slice(&actions)));
+                    }
+                    NotificationKind::Plain => {}
                 }
                 center.deliverNotification(&notif);
                 DELIVERED_NOTIFS.with(|slot| {
@@ -1704,6 +1902,63 @@ mod macos_native {
                 });
             }
         });
+    }
+
+    #[allow(deprecated)]
+    fn notification_action(id: &str, title: &str) -> Retained<NSUserNotificationAction> {
+        NSUserNotificationAction::actionWithIdentifier_title(
+            Some(&NSString::from_str(id)),
+            Some(&NSString::from_str(title)),
+        )
+    }
+
+    const KEY_DOWN: usize = 10; // NSEventTypeKeyDown
+    const KEY_UP: usize = 11; // NSEventTypeKeyUp
+    const RETURN_KEY_CODE: u16 = 36;
+
+    // Builds a Return key event (KEY_DOWN or KEY_UP) for the given window.
+    pub(crate) fn return_key_event(
+        kind: usize,
+        window_number: isize,
+    ) -> Option<Retained<AnyObject>> {
+        let characters = ns_string!("\r");
+        unsafe {
+            msg_send![
+                class!(NSEvent),
+                keyEventWithType: kind,
+                location: NSPoint::new(0.0, 0.0),
+                modifierFlags: 0usize,
+                timestamp: NSProcessInfo::processInfo().systemUptime(),
+                windowNumber: window_number,
+                context: std::ptr::null::<AnyObject>(),
+                characters: characters,
+                charactersIgnoringModifiers: characters,
+                isARepeat: false,
+                keyCode: RETURN_KEY_CODE,
+            ]
+        }
+    }
+
+    // Sends a Return key press (down, then up) to the window's web view, as
+    // if typed on the keyboard. Returns whether the press was queued.
+    pub fn press_return(window: &tauri::WebviewWindow) -> bool {
+        window
+            .with_webview(|webview| unsafe {
+                let view = webview.inner() as *mut AnyObject;
+                let ns_window = webview.ns_window() as *mut AnyObject;
+                if view.is_null() || ns_window.is_null() {
+                    return;
+                }
+                let _: bool = msg_send![ns_window, makeFirstResponder: view];
+                let window_number: isize = msg_send![ns_window, windowNumber];
+                if let Some(event) = return_key_event(KEY_DOWN, window_number) {
+                    let _: () = msg_send![view, keyDown: &*event];
+                }
+                if let Some(event) = return_key_event(KEY_UP, window_number) {
+                    let _: () = msg_send![view, keyUp: &*event];
+                }
+            })
+            .is_ok()
     }
 
     pub fn close_notification(app: &tauri::AppHandle, id: &str) {
@@ -1798,6 +2053,17 @@ mod tests {
             .collect()
     }
 
+    // Building the event checks the Objective-C call's argument types, which
+    // are only verified at run time.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn return_key_event_is_a_return_key_press() {
+        use objc2::msg_send;
+        let event = macos_native::return_key_event(10, 0).expect("event is created");
+        let key_code: u16 = unsafe { msg_send![&*event, keyCode] };
+        assert_eq!(key_code, 36);
+    }
+
     // A command has to be listed in three places to be callable from the page.
     // This fails as soon as one of them is missed.
     #[test]
@@ -1862,6 +2128,7 @@ mod tests {
         assert!(settings.background_keep_alive);
         assert!(settings.start_url.is_none());
         assert!(settings.main_window_size.is_none());
+        assert_eq!(settings.quick_action, DEFAULT_QUICK_ACTION);
     }
 
     #[test]

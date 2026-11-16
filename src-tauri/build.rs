@@ -38,6 +38,8 @@ fn main() {
             "report_heartbeat",
             "set_session_yielded",
             "prompt_takeover_session",
+            "press_enter_key",
+            "log_page_diagnostic",
         ]),
     ))
     .expect("failed to run tauri-build");

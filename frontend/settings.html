@@ -485,8 +485,15 @@
         });
       }
 
+      function setQuickAction(value) {
+        quickAction = value;
+        els.quickButtons.forEach((btn) => {
+          btn.classList.toggle('active', btn.getAttribute('data-quick-val') === quickAction);
+        });
+      }
+
       function readForm() {
-        const settings = { theme: theme, start_url: els.startUrl.value.trim() || null };
+        const settings = { theme: theme, quick_action: quickAction, start_url: els.startUrl.value.trim() || null };
         TOGGLES.forEach(([id, key]) => {
           settings[key] = els[id].checked;
         });
@@ -499,6 +506,7 @@
           els[id].checked = defaultOn ? values[key] !== false : !!values[key];
         });
         setTheme(values.theme);
+        setQuickAction(typeof values.quick_action === 'string' ? values.quick_action : DEFAULT_QUICK_ACTION);
         els.startUrl.value = values.start_url || '';
       }
 
@@ -569,6 +577,14 @@
           });
         });
 
+        els.quickButtons = document.querySelectorAll('.seg-btn[data-quick-val]');
+        els.quickButtons.forEach((btn) => {
+          btn.addEventListener('click', () => {
+            setQuickAction(btn.getAttribute('data-quick-val'));
+            save();
+          });
+        });
+
         // Clicking anywhere on an interactive toggle row flips its switch & auto-saves
         document.querySelectorAll('.row[data-toggle-for]').forEach((row) => {
           row.addEventListener('click', (e) => {
@@ -607,6 +623,10 @@
       const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
       const els = {}; // form elements by id, filled in by init()
       let theme = 'system';
+      // Emoji for the notification quick action; '' means off. Keep the default
+      // in step with DEFAULT_QUICK_ACTION in lib.rs.
+      const DEFAULT_QUICK_ACTION = '👍';
+      let quickAction = DEFAULT_QUICK_ACTION;
       let statusTimer = null;
 
       // --- Startup ---
@@ -717,6 +737,26 @@
               <input id="showNotifications" type="checkbox" />
               <span class="slider"></span>
             </label>
+          </div>
+
+          <div class="row">
+            <div class="row-left">
+              <div class="row-icon icon-blue" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z" />
+                </svg>
+              </div>
+              <div class="row-text">
+                <div class="setting-title">Quick action</div>
+                <div class="setting-desc">Emoji you can send straight from a message notification.</div>
+              </div>
+            </div>
+            <div class="segmented" role="radiogroup" aria-label="Quick action">
+              <button type="button" class="seg-btn" data-quick-val="">Off</button>
+              <button type="button" class="seg-btn" data-quick-val="👍">👍</button>
+              <button type="button" class="seg-btn" data-quick-val="❤️">❤️</button>
+              <button type="button" class="seg-btn" data-quick-val="🙂">🙂</button>
+            </div>
           </div>
 
           <div class="row interactive" data-toggle-for="backgroundKeepAlive">

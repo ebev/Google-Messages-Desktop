@@ -5,6 +5,21 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Quick reply from notifications (prototype):** message notifications can
+  offer a reply field (macOS), a configurable quick-action emoji and "Mark as
+  read" (macOS, Linux). The reply is typed and sent through the Messages page
+  only after the open conversation is confirmed to match the notification;
+  otherwise the window is shown and a "Reply not sent" notification keeps the
+  text. Windows notifications are unchanged until they move to native toasts.
+  On macOS the message is sent with a real Return key press from the app,
+  because the page ignores clicks and key presses simulated from script; this
+  only works in the bundled app, not `npm run dev`. Linux still relies on the
+  simulated path and is untested.
+- **Quick action** setting (Off / 👍 / ❤️ / 🙂) in Settings.
+
 ## [1.4.0] - 2026-11-14
 
 ### Fixed
