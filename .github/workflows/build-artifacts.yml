@@ -82,3 +82,76 @@ jobs:
         with:
           name: google-messages-macos
           path: src-tauri/target/release/bundle/dmg/*.dmg
+
+
+      # The gitea artifact upload (upload-artifact@v3) does not produce
+      # downloadable assets on this runner generation ("successfully uploaded"
+      # -> the artifacts API lists zero). Gitea release attachments provenly
+      # work, so post the packages to the release for the built ref instead.
+      - name: Post artifacts to the snapshots release
+        shell: bash
+        env:
+          OS: ${{ matrix.os }}
+          TARCH: ${{ matrix.tarch }}
+          REF: ${{ gitea.ref }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API: https://gitea.eabev.com/api/v1/repos/eric/Google-Messages
+        run: |
+          set -euo pipefail
+          snaptag="v$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)-snapshots"
+          case "$OS" in
+            ubuntu-latest)
+              base=src-tauri/target/release/bundle
+              files="$base/deb/*.deb $base/rpm/*.rpm"
+              ;;
+            windows-cross-latest)
+              base=src-tauri/target/$TARCH/release
+              files="$base/bundle/nsis/*-setup.exe"
+              ;;
+            macos-latest)
+              base=src-tauri/target/release/bundle
+              files="$base/dmg/*.dmg"
+              ;;
+            *) echo "Unknown matrix.os: $OS"; exit 1 ;;
+          esac
+          shopt -s nullglob
+          set -- $files
+          [ $# -gt 0 ] || { echo "No artifacts for $OS: $files"; exit 1; }
+          auth="Authorization: token ***"
+          resp=$(mktemp)
+          code=$(curl -sS -o "$resp" -w '%{http_code}' -H "$auth" "$API/releases/tags/$snaptag")
+          if [ "$code" = "404" ]; then
+            code=$(curl -sS -o "$resp" -w '%{http_code}' -X POST \
+              -H "$auth" -H 'Content-Type: application/json' \
+              -d "{\"tag_name\":\"$snaptag\",\"name\":\"$snaptag\",\"body\":\"rolling build of $REF\",\"prerelease\":true}" \
+              "$API/releases")
+            if [ "$code" = "409" ]; then
+              echo "Release created concurrently, re-reading it"
+              code=$(curl -sS -o "$resp" -w '%{http_code}' -H "$auth" "$API/releases/tags/$snaptag")
+            fi
+          fi
+          case "$code" in
+            200|201) ;;
+            *)
+              echo "Release lookup/creation failed for $snaptag (HTTP $code):"
+              cat "$resp"; exit 1
+              ;;
+          esac
+          id=$(grep -o '"id":[0-9]*' "$resp" | head -n 1 | cut -d: -f2)
+          echo "Using release $id for $snaptag"
+          for f in "$@"; do
+            name=$(basename "$f")
+            del_ids=$(curl -sS -H "$auth" "$API/releases/$id/assets" | python3 -c "import json,sys; asset_name=sys.argv[1]; print('\n'.join(str(a['id']) for a in json.load(sys.stdin) if a.get('name')==asset_name))" "$name")
+            for aid in $del_ids; do
+              dcode=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H "$auth" "$API/releases/$id/assets/$aid")
+              echo "Deleted stale asset id $aid (HTTP $dcode)"
+            done
+            ucode=$(curl -sS -o "$resp" -w '%{http_code}' -X POST -H "$auth" \
+              --form "attachment=@$f" \
+              "$API/releases/$id/assets?name=${name// /%20}")
+            if [ "$ucode" != "201" ]; then
+              echo "Upload of $name failed (HTTP $ucode):"
+              cat "$resp"; exit 1
+            fi
+            echo "Uploaded asset: $name"
+          done
