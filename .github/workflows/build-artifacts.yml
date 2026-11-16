@@ -1,0 +1,103 @@
+name: build-artifacts
+
+# Regular pushes produce downloadable builds: every run page carries the
+# artifacts of its leg. Superseded runs cancel, so the latest push always
+# wins without stampeding the runners.
+
+on:
+  push:
+    branches: [main, v1.5]
+  workflow_dispatch:
+
+concurrency:
+  group: artifacts-${{ gitea.ref }}
+  cancel-in-progress: true
+
+jobs:
+  packages:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            targets: deb,rpm
+          - os: windows-cross-latest
+            targets: dual-nsis
+          - os: macos-latest
+            targets: dmg
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches Cargo.toml version
+        if: matrix.os == 'windows-cross-latest'
+        shell: bash
+        env:
+          REF: 'refs/heads/main'
+        run: |
+          crate_version=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)
+          echo "Building google-messages ${crate_version} (no tag check needed on push runs)"
+          # version echo only; tag asserts only make sense on tag-triggered runs
+      - run: npm ci
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          workspaces: src-tauri
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build (Linux deb/rpm)
+        if: matrix.os == 'ubuntu-latest'
+        run: npm run tauri build -- -b deb,rpm
+      # windows-cross-latest is a Linux container: cargo-xwin links against the
+      # MSVC SDK and makensis builds the installer, so no Windows host is needed.
+      # One leg builds BOTH arch payloads and wraps them in a single dual-arch
+      # installer (scripts/installer/dual-arch-installer.nsi) that silently runs
+      # the matching Tauri installer on the host — x64 or native ARM64.
+      - name: Build (Windows cross, dual-arch NSIS)
+        if: matrix.os == 'windows-cross-latest'
+        shell: bash
+        run: |
+          crate_version=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)
+          npm run tauri build -- -b nsis --runner cargo-xwin --target x86_64-pc-windows-msvc 2>&1 | tail -2
+          npm run tauri build -- -b nsis --runner cargo-xwin --target aarch64-pc-windows-msvc 2>&1 | tail -2
+          x64_setup=$(find src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis -maxdepth 1 -type f -name '*-setup.exe' | head -n 1)
+          arm64_setup=$(find src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis -maxdepth 1 -type f -name '*-setup.exe' | head -n 1)
+          [ -n "$x64_setup" ] && [ -n "$arm64_setup" ]
+          mkdir -p src-tauri/target/dual
+          # makensis -DNAME=value defines must each be ONE shell word (spaces
+          # inside the value are fine; splitting them kills the script arg).
+          nsis_args=(-DCI_PRODUCT='Google Messages' -DCI_VERSION="$crate_version")
+          nsis_args+=(-DCI_PAYLOAD_X64="$x64_setup")
+          nsis_args+=(-DCI_PAYLOAD_ARM64="$arm64_setup")
+          nsis_args+=(-DCI_OUTFILE="src-tauri/target/dual/Google Messages_${crate_version}_x64-arm64-setup.exe")
+          makensis "${nsis_args[@]}" scripts/installer/dual-arch-installer.nsi
+          ls -la src-tauri/target/dual/
+      # Ad-hoc signed (signingIdentity "-" in tauri.conf.json), not notarized.
+      - name: Build (macOS dmg)
+        if: matrix.os == 'macos-latest'
+        run: npm run tauri build -- -b dmg
+      - name: Upload artifacts (linux)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v3
+        with:
+          name: google-messages-linux
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
+      - name: Upload artifacts (windows)
+        if: matrix.os == 'windows-cross-latest'
+        uses: actions/upload-artifact@v3
+        with:
+          name: google-messages-windows
+          path: src-tauri/target/dual/*
+      - name: Upload artifacts (macos)
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v3
+        with:
+          name: google-messages-macos
+          path: src-tauri/target/release/bundle/dmg/*.dmg
