@@ -1,0 +1,3 @@
+# Store text files with LF and check them out with LF on every platform, so
+# files rewritten by build tools on Windows do not show up as modified.
+* text=auto eol=lf
