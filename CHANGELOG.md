@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emoji and "Mark as read" button, and "Switch Here" / "No" on the "open on
   another computer" alert. The app registers its AppUserModelID in the
   registry at startup so toasts carry its name and icon, and removes its
-  toasts when it quits. Replies are sent with a real Enter key press through
+  toasts when it quits. Toasts with a reply field stay on screen for about 25
+  seconds instead of about 5. Replies are sent with a real Enter key press through
   WebView2's DevTools protocol.
 
 ### Removed

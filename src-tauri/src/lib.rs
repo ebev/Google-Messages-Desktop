@@ -826,8 +826,14 @@ fn xml_escape(text: &str) -> String {
 // back when it is pressed; see `windows_native::on_activated`.
 #[cfg(any(windows, test))]
 fn toast_xml(title: &str, body: &str, kind: &NotificationKind) -> String {
+    // A toast with a reply field stays up for Windows' "long" duration (about
+    // 25 seconds instead of about 5), so there is time to start typing.
+    let duration = match kind {
+        NotificationKind::Conversation { .. } => " duration=\"long\"",
+        _ => "",
+    };
     let mut xml = format!(
-        "<toast launch=\"{TOAST_ARG_OPEN}\"><visual><binding template=\"ToastGeneric\"><text>{}</text>",
+        "<toast launch=\"{TOAST_ARG_OPEN}\"{duration}><visual><binding template=\"ToastGeneric\"><text>{}</text>",
         xml_escape(title)
     );
     if !body.is_empty() {
@@ -2476,6 +2482,7 @@ mod tests {
         let xml = toast_xml("A & B", "1 < 2", &NotificationKind::Plain);
         assert!(xml.contains("<text>A &amp; B</text><text>1 &lt; 2</text>"));
         assert!(!xml.contains("<actions>"));
+        assert!(!xml.contains("duration="));
     }
 
     #[test]
@@ -2484,6 +2491,7 @@ mod tests {
             quick_action: Some("👍".to_string()),
         };
         let xml = toast_xml("Bob", "hi", &kind);
+        assert!(xml.starts_with("<toast launch=\"open\" duration=\"long\">"));
         assert!(xml.contains("<input id=\"reply\" type=\"text\""));
         assert!(xml
             .contains("arguments=\"reply\" activationType=\"foreground\" hint-inputId=\"reply\""));
