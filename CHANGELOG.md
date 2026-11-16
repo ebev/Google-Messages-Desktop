@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because the page ignores clicks and key presses simulated from script; this
   only works in the bundled app, not `npm run dev`. Linux still relies on the
   simulated path and is untested.
-- **Quick action** setting (Off / 👍 / ❤️ / 🙂) in Settings.
+- **Quick action** setting (Off / 👍 / ❤️ / 🙂) in Settings, with a "+" button
+  that opens an emoji picker for any other emoji (pick from a grid, or type
+  or paste one).
 - **Native Windows toasts (untested on Windows):** Windows notifications are
   now native toasts sent from Rust, with the same reply field, quick-action
   emoji and "Mark as read" button, and "Switch Here" / "No" on the "open on

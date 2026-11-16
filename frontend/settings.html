@@ -328,6 +328,86 @@
         box-shadow: var(--seg-active-shadow);
       }
 
+      /* Emoji picker for a custom quick action. Positioned by JS under the
+         "+" button; `fixed` so the card's clipping does not cut it off. */
+      .emoji-picker {
+        position: fixed;
+        z-index: 20;
+        width: 264px;
+        padding: 10px;
+        background: var(--card-bg);
+        border: 1px solid var(--card-border);
+        border-radius: 10px;
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22);
+      }
+
+      .emoji-picker[hidden] {
+        display: none;
+      }
+
+      .emoji-grid {
+        display: grid;
+        grid-template-columns: repeat(8, 1fr);
+        gap: 2px;
+      }
+
+      .emoji-option {
+        border: none;
+        background: transparent;
+        font-size: 18px;
+        line-height: 1;
+        padding: 5px 0;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+
+      .emoji-option:hover,
+      .emoji-option:focus-visible {
+        background: var(--btn-hover);
+        outline: none;
+      }
+
+      .emoji-custom {
+        display: flex;
+        gap: 6px;
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid var(--row-divider);
+      }
+
+      .emoji-custom input {
+        flex: 1;
+        min-width: 0;
+        font: inherit;
+        font-size: 13px;
+        color: var(--fg);
+        background: var(--input-bg);
+        border: 1px solid var(--input-border);
+        border-radius: 6px;
+        padding: 5px 8px;
+      }
+
+      .emoji-custom button {
+        font: inherit;
+        font-size: 12px;
+        color: var(--fg);
+        background: var(--btn-bg);
+        border: 1px solid var(--btn-border);
+        border-radius: 6px;
+        padding: 5px 10px;
+        cursor: pointer;
+      }
+
+      .emoji-hint {
+        margin-top: 6px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+
+      .emoji-hint.error {
+        color: var(--danger);
+      }
+
       /* Text Input & Reset */
       .url-field-wrap {
         display: flex;
@@ -485,11 +565,92 @@
         });
       }
 
+      // Selects the quick action. A value that is not one of the preset
+      // buttons is a custom emoji, shown on the last button in place of "+".
       function setQuickAction(value) {
         quickAction = value;
+        let isPreset = false;
         els.quickButtons.forEach((btn) => {
-          btn.classList.toggle('active', btn.getAttribute('data-quick-val') === quickAction);
+          const match = btn.getAttribute('data-quick-val') === quickAction;
+          btn.classList.toggle('active', match);
+          if (match) isPreset = true;
         });
+        if (!isPreset) customQuickAction = quickAction;
+        els.quickCustomBtn.textContent = customQuickAction || '+';
+        els.quickCustomBtn.classList.toggle('active', !isPreset);
+        els.quickCustomBtn.setAttribute('aria-label', customQuickAction ? 'Custom emoji ' + customQuickAction + ', change' : 'Choose another emoji');
+      }
+
+      // The first whole emoji in the text ('' if there is none), so a typed or
+      // pasted value is one emoji even when it is made of several code points.
+      function firstEmoji(text) {
+        const trimmed = String(text || '').trim();
+        if (!trimmed) return '';
+        let first = Array.from(trimmed)[0];
+        if (window.Intl && Intl.Segmenter) {
+          const segment = new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(trimmed)[Symbol.iterator]().next();
+          if (!segment.done) first = segment.value.segment;
+        }
+        const isEmoji = /\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20E3/u.test(first);
+        const fits = new TextEncoder().encode(first).length <= MAX_QUICK_ACTION_BYTES;
+        return isEmoji && fits ? first : '';
+      }
+
+      function openEmojiPicker() {
+        if (!els.emojiGrid.childElementCount) {
+          PICKER_EMOJI.forEach((emoji) => {
+            const option = document.createElement('button');
+            option.type = 'button';
+            option.className = 'emoji-option';
+            option.textContent = emoji;
+            option.addEventListener('click', () => chooseCustomEmoji(emoji));
+            els.emojiGrid.appendChild(option);
+          });
+        }
+        els.emojiInput.value = '';
+        setEmojiHint(EMOJI_HINT, false);
+        els.emojiPicker.hidden = false;
+        // Under the "+" button, right-aligned, kept inside the window.
+        const anchor = els.quickCustomBtn.getBoundingClientRect();
+        const picker = els.emojiPicker.getBoundingClientRect();
+        const left = Math.max(8, Math.min(anchor.right - picker.width, window.innerWidth - picker.width - 8));
+        let top = anchor.bottom + 6;
+        if (top + picker.height > window.innerHeight - 8) top = Math.max(8, anchor.top - picker.height - 6);
+        els.emojiPicker.style.left = left + 'px';
+        els.emojiPicker.style.top = top + 'px';
+        els.quickCustomBtn.setAttribute('aria-expanded', 'true');
+        els.emojiInput.focus();
+      }
+
+      function closeEmojiPicker() {
+        els.emojiPicker.hidden = true;
+        els.quickCustomBtn.setAttribute('aria-expanded', 'false');
+      }
+
+      function isEmojiPickerOpen() {
+        return !els.emojiPicker.hidden;
+      }
+
+      function setEmojiHint(text, isError) {
+        els.emojiHint.textContent = text;
+        els.emojiHint.classList.toggle('error', isError);
+      }
+
+      function chooseCustomEmoji(emoji) {
+        setQuickAction(emoji);
+        closeEmojiPicker();
+        els.quickCustomBtn.focus();
+        save();
+      }
+
+      // Uses whatever was typed or pasted into the picker's text field.
+      function submitTypedEmoji() {
+        const emoji = firstEmoji(els.emojiInput.value);
+        if (!emoji) {
+          setEmojiHint('Enter a single emoji.', true);
+          return;
+        }
+        chooseCustomEmoji(emoji);
       }
 
       function readForm() {
@@ -554,6 +715,19 @@
       function handleKeydown(e) {
         const mod = e.metaKey || e.ctrlKey;
         const key = (e.key || '').toLowerCase();
+        // While the emoji picker is open, Escape closes it and Enter in its
+        // text field picks that emoji, rather than closing or saving the window.
+        if (isEmojiPickerOpen() && e.key === 'Escape') {
+          e.preventDefault();
+          closeEmojiPicker();
+          els.quickCustomBtn.focus();
+          return;
+        }
+        if (e.key === 'Enter' && e.target === els.emojiInput) {
+          e.preventDefault();
+          submitTypedEmoji();
+          return;
+        }
         if (e.key === 'Escape' || (mod && key === 'w')) {
           e.preventDefault();
           closeWindow();
@@ -564,7 +738,7 @@
       }
 
       function init() {
-        ['status', 'appVersion', 'startUrl', 'resetUrlBtn', 'saveBtn', 'closeBtn'].concat(TOGGLES.map((t) => t[0])).forEach((id) => {
+        ['status', 'appVersion', 'startUrl', 'resetUrlBtn', 'saveBtn', 'closeBtn', 'quickCustomBtn', 'emojiPicker', 'emojiGrid', 'emojiInput', 'emojiUseBtn', 'emojiHint'].concat(TOGGLES.map((t) => t[0])).forEach((id) => {
           els[id] = document.getElementById(id);
         });
         els.themeButtons = document.querySelectorAll('.seg-btn[data-theme-val]');
@@ -584,6 +758,18 @@
             save();
           });
         });
+        els.quickCustomBtn.addEventListener('click', () => {
+          if (isEmojiPickerOpen()) closeEmojiPicker();
+          else openEmojiPicker();
+        });
+        els.emojiUseBtn.addEventListener('click', submitTypedEmoji);
+        // A click anywhere else closes the picker.
+        document.addEventListener('mousedown', (e) => {
+          if (isEmojiPickerOpen() && !els.emojiPicker.contains(e.target) && !els.quickCustomBtn.contains(e.target)) {
+            closeEmojiPicker();
+          }
+        });
+        window.addEventListener('resize', closeEmojiPicker);
 
         // Clicking anywhere on an interactive toggle row flips its switch & auto-saves
         document.querySelectorAll('.row[data-toggle-for]').forEach((row) => {
@@ -627,6 +813,20 @@
       // in step with DEFAULT_QUICK_ACTION in lib.rs.
       const DEFAULT_QUICK_ACTION = '👍';
       let quickAction = DEFAULT_QUICK_ACTION;
+      // The last emoji chosen from the picker, kept on the "+" button while
+      // this window is open even after switching back to a preset.
+      let customQuickAction = '';
+      // Keep in step with MAX_QUICK_ACTION_BYTES in lib.rs.
+      const MAX_QUICK_ACTION_BYTES = 32;
+      const EMOJI_HINT = 'Or type or paste any emoji.';
+      const PICKER_EMOJI = [
+        '😀', '😂', '🤣', '😅', '😊', '😇', '😉', '😍',
+        '🥰', '😘', '😎', '🤗', '🤔', '🙄', '😬', '😳',
+        '😴', '😢', '😭', '😡', '😮', '🥳', '💀', '👀',
+        '👌', '👏', '🙌', '🙏', '🤝', '💪', '👋', '✌️',
+        '🤷', '🤦', '💯', '🔥', '🎉', '✨', '⭐', '💔',
+        '✅', '❌', '⏰', '📞', '🚗', '🏠', '☕', '🍻',
+      ];
       let statusTimer = null;
 
       // --- Startup ---
@@ -756,6 +956,7 @@
               <button type="button" class="seg-btn" data-quick-val="👍">👍</button>
               <button type="button" class="seg-btn" data-quick-val="❤️">❤️</button>
               <button type="button" class="seg-btn" data-quick-val="🙂">🙂</button>
+              <button type="button" class="seg-btn" id="quickCustomBtn" aria-haspopup="dialog" aria-expanded="false" aria-label="Choose another emoji">+</button>
             </div>
           </div>
 
@@ -812,5 +1013,13 @@
       </div>
     </footer>
 
+    <div class="emoji-picker" id="emojiPicker" role="dialog" aria-label="Choose an emoji" hidden>
+      <div class="emoji-grid" id="emojiGrid"></div>
+      <div class="emoji-custom">
+        <input type="text" id="emojiInput" aria-label="Emoji" autocomplete="off" spellcheck="false" />
+        <button type="button" id="emojiUseBtn">Use</button>
+      </div>
+      <div class="emoji-hint" id="emojiHint"></div>
+    </div>
   </body>
 </html>
