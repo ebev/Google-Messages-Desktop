@@ -72,7 +72,10 @@ jobs:
           API: https://gitea.eabev.com/api/v1/repos/eric/Google-Messages
         run: |
           set -euo pipefail
-          snaptag="v$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)-snapshots"
+          # Stable rolling page: one snapshots release, replaced per push. It
+          # deliberately does NOT carry the crate version — that still says
+          # 1.4.0 on this branch and would rename the page every bump.
+          snaptag="snapshots"
           case "$OS" in
             ubuntu-latest)
               base="src-tauri/target/release/bundle"
