@@ -34,7 +34,7 @@ const PAGE = `<!DOCTYPE html><html><head><title>Messages</title></head><body>
 //   title          initial document title, e.g. '(2) Messages'
 //   unread         ids of sidebar rows to mark unread before the script runs
 //   notifications  value substituted for the "show notifications" setting
-//   webNotification  a fake window.Notification class (the WebView2 path)
+//   webNotification  a window.Notification class present before the script runs
 //   nativeEnter    the app can press a real Return key (as on macOS)
 function loadPage(options = {}) {
     const dom = new JSDOM(PAGE, {
@@ -254,57 +254,22 @@ test('lists and filters active notifications for the service worker API', async 
     assert.equal((await registration.prototype.getNotifications.call({}, { tag: 'other' })).length, 0);
 });
 
-// --- WebView2 (Windows) notification path ---
-
-function fakeWebNotification({ failing = false } = {}) {
-    return class FakeNotification {
-        static permission = 'granted';
-        static instances = [];
-        static requestPermission() { return Promise.resolve('granted'); }
-        constructor(title, options) {
-            if (failing) throw new Error('notification unavailable');
-            this.title = title;
-            this.options = options;
-            this.closed = false;
-            FakeNotification.instances.push(this);
-        }
-        addEventListener() {}
-        close() { this.closed = true; }
-    };
-}
-
-test('on Windows, shows notifications through the webview instead of the native bridge', (t) => {
-    const Fake = fakeWebNotification();
-    const page = loadPage({ platform: 'Win32', webNotification: Fake, title: '(1) Messages', unread: ['alice'] });
+test('on Windows, notifications go through the native bridge like other platforms', (t) => {
+    // A page Notification class must not be used, even where one exists.
+    let constructed = 0;
+    class PageNotification {
+        static permission = 'default';
+        static requestPermission() { return Promise.resolve('denied'); }
+        constructor() { constructed += 1; }
+    }
+    const page = loadPage({ platform: 'Win32', webNotification: PageNotification, title: '(1) Messages', unread: ['alice'] });
     t.after(page.close);
+    assert.equal(page.window.Notification.permission, 'granted');
     const n = new page.window.Notification('Alice', { body: 'hello', tag: 'conv-1' });
-    assert.equal(Fake.instances.length, 1);
-    assert.equal(count(page, 'send_native_notification'), 0);
+    assert.equal(constructed, 0);
+    assert.equal(last(page, 'send_native_notification').id, 'conv-1');
     n.close();
-    assert.equal(Fake.instances[0].closed, true);
-});
-
-test('on Windows, a takeover notification does not cause repeated clears while unread is zero', (t) => {
-    const Fake = fakeWebNotification();
-    const page = loadPage({ platform: 'Win32', webNotification: Fake });
-    t.after(page.close);
-    page.window.__gmShowWebviewNotification('Open elsewhere', 'body', 'takeover', { tag: 'gm-takeover' });
-    const before = count(page, 'clear_native_notifications');
-    page.sync();
-    page.sync();
-    assert.equal(count(page, 'clear_native_notifications'), before);
-    // Clearing message notifications leaves the takeover one open.
-    page.window.__gmClearWebviewNotifications();
-    assert.equal(Fake.instances[0].closed, false);
-    page.window.__gmCloseWebviewNotification('gm-takeover');
-    assert.equal(Fake.instances[0].closed, true);
-});
-
-test('a notification requested by Rust never bounces back to Rust when the webview fails', (t) => {
-    const page = loadPage({ platform: 'Win32', webNotification: fakeWebNotification({ failing: true }) });
-    t.after(page.close);
-    page.window.__gmShowWebviewNotification('Alice', 'hello', 'message', { tag: 'conv-1' });
-    assert.equal(count(page, 'send_native_notification'), 0);
+    assert.equal(last(page, 'close_native_notification').id, 'conv-1');
 });
 
 // --- Background animation frames ---

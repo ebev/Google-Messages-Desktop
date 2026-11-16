@@ -30,6 +30,9 @@ objc2-foundation = { version = "0.3", features = ["NSArray", "NSAttributedString
 # pinned to match what wry 0.55 uses, so the COM types unify.
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
+# Native toast notifications (reply field and buttons) and the registry entry
+# that gives them the app's name and icon. Same version Tauri already uses.
+windows = { version = "0.61", features = ["Data_Xml_Dom", "Foundation", "Foundation_Collections", "UI_Notifications", "Win32_System_Registry"] }
 
 # Linux-only: needed to enable WebKitGTK media-stream/WebRTC settings and
 # auto-grant user-media permission requests so calls work, plus D-Bus desktop

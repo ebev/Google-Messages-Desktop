@@ -278,9 +278,7 @@
     function closeNotificationEntry(entry, notifyBackend) {
         if (!entry) return;
         activeNotifications.delete(entry.id);
-        if (entry.webviewNotif) {
-            try { entry.webviewNotif.close(); } catch (_) {}
-        } else if (notifyBackend) {
+        if (notifyBackend) {
             send('close_native_notification', { id: entry.id });
         }
     }
@@ -299,10 +297,6 @@
         }
     }
 
-    function clearWebviewNotifications() {
-        closeMessageNotifications(null, false);
-    }
-
     function hasMessageNotifications() {
         let found = false;
         activeNotifications.forEach(function (entry) {
@@ -316,7 +310,7 @@
             clearTimeout(pendingFallbackTimer);
             pendingFallbackTimer = null;
         }
-        clearWebviewNotifications();
+        closeMessageNotifications(null, false);
         send('clear_native_notifications');
     }
 
@@ -733,15 +727,6 @@
         send('focus_main_window');
     }
 
-    function requestWebviewNotificationPermission() {
-        if (useWebviewNotification && OrigNotification.permission === 'default' && window.__GM_SHOW_NOTIFICATIONS !== false) {
-            try {
-                const p = OrigNotification.requestPermission();
-                if (p && p.catch) p.catch(function () {});
-            } catch (_) {}
-        }
-    }
-
     // Minimal Notification-like object handed back to the web app so its
     // .onclick / addEventListener / .close() calls keep working.
     function createNotificationStub(onAppClose, tag, title, body) {
@@ -826,7 +811,6 @@
             title: normTitle,
             kind: effKind,
             createdAt: Date.now(),
-            webviewNotif: null,
             stub: null
         };
 
@@ -841,34 +825,6 @@
             }
         }, tag, normTitle, normBody);
         entry.stub = stub;
-
-        if (useWebviewNotification) {
-            try {
-                const n = new OrigNotification(normTitle, {
-                    body: normBody,
-                    tag: tag,
-                    icon: opts.icon || undefined,
-                    silent: opts.silent || undefined
-                });
-                entry.webviewNotif = n;
-                n.addEventListener('click', function (evt) {
-                    fireNotificationClick(entry, evt);
-                    if (effKind === 'takeover') {
-                        send('prompt_takeover_session');
-                    } else {
-                        focusAppWindow();
-                    }
-                });
-                activeNotifications.set(id, entry);
-                return stub;
-            } catch (_) {}
-        }
-
-        // Rust asked for this one (Windows), so the native command would only
-        // call straight back into this function: give up instead of looping.
-        if (opts.fromBackend) {
-            return stub;
-        }
 
         activeNotifications.set(id, entry);
         send('send_native_notification', {
@@ -889,33 +845,16 @@
         return dispatchNotification(title, opts.body || '', 'message', opts);
     }
 
-    // Called from Rust (Windows) to show / close / clear WebView2 notifications.
-    function showWebviewNotification(title, body, kind, options) {
-        dispatchNotification(title, body, kind || 'message', Object.assign({}, options, { fromBackend: true }));
-    }
-
-    function closeWebviewNotification(id) {
-        if (id && activeNotifications.has(id)) {
-            closeNotificationEntry(activeNotifications.get(id), false);
-        }
-    }
-
     // Replacement for window.Notification.
     function GMNotification(title, options) {
         return showMessageNotification(title, options);
     }
 
     function gmRequestPermission() {
-        if (useWebviewNotification && OrigNotification.requestPermission) {
-            return OrigNotification.requestPermission();
-        }
         return Promise.resolve('granted');
     }
 
     function gmPermission() {
-        if (useWebviewNotification && OrigNotification.permission && OrigNotification.permission !== 'default') {
-            return OrigNotification.permission;
-        }
         return 'granted';
     }
 
@@ -1485,8 +1424,6 @@
     ];
 
     const isMac = /Mac|iPod|iPhone|iPad/.test(navigator.platform || '');
-    const OrigNotification = window.Notification;
-    const useWebviewNotification = !isMac && !/Linux/.test(navigator.platform || '') && typeof OrigNotification === 'function';
     const origOpen = window.open;
     const origRAF = window.requestAnimationFrame;
     const origCAF = window.cancelAnimationFrame;
@@ -1526,9 +1463,6 @@
     window.__GM_BACKGROUND_KEEP_ALIVE = __GM_KEEP_ALIVE_DEFAULT__;
 
     // Entry points called from Rust via eval.
-    window.__gmShowWebviewNotification = showWebviewNotification;
-    window.__gmCloseWebviewNotification = closeWebviewNotification;
-    window.__gmClearWebviewNotifications = clearWebviewNotifications;
     window.__gmNativeNotificationClicked = nativeNotificationClicked;
     window.__gmNotificationAction = handleNotificationAction;
     window.__GM_SHOW_TAKEOVER_PROMPT = showTakeoverPrompt;
@@ -1536,7 +1470,6 @@
 
     // Browser API overrides.
     window.open = routedWindowOpen;
-    requestWebviewNotificationPermission();
     installNotificationBridge();
     installBackgroundAnimationFrame();
 

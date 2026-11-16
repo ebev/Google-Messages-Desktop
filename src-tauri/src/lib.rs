@@ -64,6 +64,23 @@ const MIN_MAIN_SIZE: (f64, f64) = (400.0, 500.0);
 // Minimum gap between watchdog-triggered reloads so auto-reload can never loop.
 const AUTO_RELOAD_COOLDOWN_SECS: u64 = 120;
 
+// What a Windows toast reports back when it is clicked: `launch` for the body,
+// and each button's `arguments`. The reply text arrives under the input's id.
+#[cfg(any(windows, test))]
+const TOAST_ARG_OPEN: &str = "open";
+#[cfg(any(windows, test))]
+const TOAST_ARG_REPLY: &str = "reply";
+#[cfg(any(windows, test))]
+const TOAST_ARG_QUICK: &str = "quick";
+#[cfg(any(windows, test))]
+const TOAST_ARG_READ: &str = "read";
+#[cfg(any(windows, test))]
+const TOAST_ARG_SWITCH: &str = "switch";
+#[cfg(any(windows, test))]
+const TOAST_ARG_NO: &str = "no";
+#[cfg(any(windows, test))]
+const TOAST_REPLY_INPUT: &str = "reply";
+
 #[cfg(windows)]
 const WINDOWS_BROWSER_ARGS: &str =
     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
@@ -145,7 +162,6 @@ enum NotificationKind {
 
 // Something the user did from a conversation notification without opening
 // the window.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 enum NotificationAction {
     // Send this text to the conversation (typed reply or quick-action emoji).
     Reply(String),
@@ -485,6 +501,9 @@ fn save_main_window_size(app: &tauri::AppHandle) {
 // fires CloseRequested on the quit path, so it has to be saved here.
 fn quit_app(app: &tauri::AppHandle) {
     save_main_window_size(app);
+    // Toasts left behind could not do anything once the app is gone.
+    #[cfg(windows)]
+    windows_native::remove_all_notifications();
     app.exit(0);
 }
 
@@ -499,7 +518,6 @@ fn open_and_prompt_takeover(app: &tauri::AppHandle) {
 }
 
 // True for the "open on another computer" notification's identifier.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn is_takeover_notification(id: &str) -> bool {
     id.starts_with(TAKEOVER_NOTIFICATION_ID)
 }
@@ -507,7 +525,6 @@ fn is_takeover_notification(id: &str) -> bool {
 // Carries out a reply or mark-as-read chosen on a notification by handing it
 // to the page script, which drives the Messages UI. The window stays where it
 // is; the script shows it only if the action cannot be completed.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn handle_notification_action(
     app: &tauri::AppHandle,
     id: &str,
@@ -536,7 +553,6 @@ fn handle_notification_action(
 // opens the "move session here?" prompt; a message notification shows the
 // window and hands the click to the page, which runs the web app's own click
 // handler so the conversation opens.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn handle_notification_click(app: &tauri::AppHandle, id: &str, is_takeover: bool) {
     if is_takeover {
         open_and_prompt_takeover(app);
@@ -632,8 +648,7 @@ fn start_background_listener(app: tauri::AppHandle) {
 // =============================================================================
 // Each platform provides `send_os_notification`, `close_os_notification` and
 // `clear_os_notifications`. macOS: `macos_native` (imported above). Linux:
-// D-Bus via notify-rust. Windows: WebView2's own Notification, driven through
-// the page script.
+// D-Bus via notify-rust. Windows: native toasts in `windows_native`.
 
 #[cfg(target_os = "linux")]
 fn linux_notif_map() -> &'static std::sync::Mutex<LinuxNotifMap> {
@@ -774,43 +789,92 @@ fn send_os_notification(
     body: String,
     kind: NotificationKind,
 ) {
-    if let (Ok(i), Ok(t), Ok(b)) = (
-        serde_json::to_string(&id),
-        serde_json::to_string(&title),
-        serde_json::to_string(&body),
-    ) {
-        let kind = if kind == NotificationKind::Takeover {
-            "\"takeover\""
-        } else {
-            "\"message\""
-        };
-        eval_in_main(
-            app,
-            &format!(
-                "window.__gmShowWebviewNotification && window.__gmShowWebviewNotification({t}, {b}, {kind}, {{ tag: {i} }});"
-            ),
-        );
-    }
+    windows_native::send_notification(app, id, title, body, kind);
 }
 
 #[cfg(windows)]
-fn close_os_notification(app: &tauri::AppHandle, id: &str) {
-    if let Ok(i) = serde_json::to_string(id) {
-        eval_in_main(
-            app,
-            &format!(
-                "window.__gmCloseWebviewNotification && window.__gmCloseWebviewNotification({i});"
-            ),
-        );
-    }
+fn close_os_notification(_app: &tauri::AppHandle, id: &str) {
+    windows_native::close_notification(id);
 }
 
 #[cfg(windows)]
-fn clear_os_notifications(app: &tauri::AppHandle) {
-    eval_in_main(
-        app,
-        "window.__gmClearWebviewNotifications && window.__gmClearWebviewNotifications();",
+fn clear_os_notifications(_app: &tauri::AppHandle) {
+    windows_native::clear_notifications();
+}
+
+// Escapes text for use inside toast XML (element text or an attribute), and
+// drops control characters that XML does not allow at all.
+#[cfg(any(windows, test))]
+fn xml_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            '\t' | '\n' | '\r' => out.push(ch),
+            ch if ch.is_control() => {}
+            ch => out.push(ch),
+        }
+    }
+    out
+}
+
+// Builds the XML for a Windows toast. The `arguments` of each button come
+// back when it is pressed; see `windows_native::on_activated`.
+#[cfg(any(windows, test))]
+fn toast_xml(title: &str, body: &str, kind: &NotificationKind) -> String {
+    let mut xml = format!(
+        "<toast launch=\"{TOAST_ARG_OPEN}\"><visual><binding template=\"ToastGeneric\"><text>{}</text>",
+        xml_escape(title)
     );
+    if !body.is_empty() {
+        xml.push_str(&format!("<text>{}</text>", xml_escape(body)));
+    }
+    xml.push_str("</binding></visual>");
+    let button = |label: &str, argument: &str| {
+        format!(
+            "<action content=\"{}\" arguments=\"{argument}\" activationType=\"foreground\"/>",
+            xml_escape(label)
+        )
+    };
+    match kind {
+        NotificationKind::Takeover => {
+            xml.push_str("<actions>");
+            xml.push_str(&button("Switch Here", TOAST_ARG_SWITCH));
+            xml.push_str(&button("No", TOAST_ARG_NO));
+            xml.push_str("</actions>");
+        }
+        NotificationKind::Conversation { quick_action } => {
+            // A text field with its own Send button, then the extra buttons.
+            xml.push_str(&format!(
+                "<actions><input id=\"{TOAST_REPLY_INPUT}\" type=\"text\" placeHolderContent=\"Reply…\"/>\
+                 <action content=\"Send\" arguments=\"{TOAST_ARG_REPLY}\" activationType=\"foreground\" hint-inputId=\"{TOAST_REPLY_INPUT}\"/>"
+            ));
+            if let Some(emoji) = quick_action {
+                xml.push_str(&button(emoji, TOAST_ARG_QUICK));
+            }
+            xml.push_str(&button("Mark as read", TOAST_ARG_READ));
+            xml.push_str("</actions>");
+        }
+        NotificationKind::Plain => {}
+    }
+    xml.push_str("</toast>");
+    xml
+}
+
+// A short, stable tag for a toast, derived from our notification id (FNV-1a).
+// Windows limits tag length, and ids can be long and contain any character.
+#[cfg(any(windows, test))]
+fn toast_tag(id: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in id.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 // =============================================================================
@@ -1216,15 +1280,14 @@ fn build_macos_app_menu(app: &tauri::App) -> tauri::Result<()> {
 // Media permissions (Windows / Linux)
 // =============================================================================
 
-// Auto-allow microphone, camera, and notification permission requests in the
-// WebView2 webview so calls and background notifications work without prompting
-// the user every session. Mirrors the pattern wry uses internally for clipboard.
+// Auto-allow microphone and camera permission requests in the WebView2 webview
+// so calls work without prompting the user every session. (Notifications are
+// native toasts sent from Rust, so the page needs no notification permission.) Mirrors the pattern wry uses internally for clipboard.
 #[cfg(windows)]
 fn grant_media_permissions(window: &tauri::WebviewWindow) {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
-        COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS,
-        COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+        COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
     };
     use webview2_com::PermissionRequestedEventHandler;
 
@@ -1239,7 +1302,6 @@ fn grant_media_permissions(window: &tauri::WebviewWindow) {
                         args.PermissionKind(&mut kind)?;
                         if kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE
                             || kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
-                            || kind == COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS
                         {
                             args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
                         }
@@ -1359,7 +1421,11 @@ fn press_enter_key(app: tauri::AppHandle) -> bool {
     {
         main_window(&app).is_some_and(|window| macos_native::press_return(&window))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        main_window(&app).is_some_and(|window| windows_native::press_return(&window))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = app;
         false
@@ -1617,6 +1683,8 @@ pub fn run() {
             BACKGROUND_KEEP_ALIVE.store(settings.background_keep_alive, Ordering::Relaxed);
             #[cfg(target_os = "macos")]
             macos_native::init_notifications(&handle);
+            #[cfg(windows)]
+            windows_native::init_notifications(&handle);
             sync_os_keep_alive(&handle);
 
             #[allow(unused_variables)]
@@ -2004,6 +2072,252 @@ mod macos_native {
 }
 
 // =============================================================================
+// Windows native toasts
+// =============================================================================
+
+#[cfg(windows)]
+mod windows_native {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    use tauri::Manager;
+    use windows::core::{IInspectable, Interface, HSTRING};
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::Foundation::{IPropertyValue, TypedEventHandler};
+    use windows::Win32::System::Registry::{RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ};
+    use windows::UI::Notifications::{
+        ToastActivatedEventArgs, ToastNotification, ToastNotificationManager,
+    };
+
+    use crate::{NotificationAction, NotificationKind};
+
+    // Toast groups. Clearing message notifications removes one group and
+    // leaves the takeover toast alone.
+    const GROUP_MESSAGES: &str = "messages";
+    const GROUP_TAKEOVER: &str = "takeover";
+
+    // Shown next to the app name on toasts.
+    const TOAST_ICON: &[u8] = include_bytes!("../icons/128x128.png");
+
+    // The AppUserModelID toasts are sent under; set once at startup.
+    static APP_ID: OnceLock<HSTRING> = OnceLock::new();
+    // Toasts we have shown, by our notification id. A toast only reports
+    // clicks while its object is alive, so they are kept until closed.
+    static TOASTS: OnceLock<Mutex<HashMap<String, ToastNotification>>> = OnceLock::new();
+
+    fn toasts() -> &'static Mutex<HashMap<String, ToastNotification>> {
+        TOASTS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn group_for(id: &str) -> &'static str {
+        if crate::is_takeover_notification(id) {
+            GROUP_TAKEOVER
+        } else {
+            GROUP_MESSAGES
+        }
+    }
+
+    fn set_registry_string(key: &str, name: &str, value: &str) {
+        let data: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            let _ = RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                &HSTRING::from(key),
+                &HSTRING::from(name),
+                REG_SZ.0,
+                Some(data.as_ptr().cast()),
+                (data.len() * std::mem::size_of::<u16>()) as u32,
+            );
+        }
+    }
+
+    // Registers the app's identity for toasts. An app that is not installed
+    // from a package needs its AppUserModelID described in the registry for
+    // toasts to carry its name and icon; doing it at startup covers dev runs
+    // as well as installed builds (whose Start Menu shortcut uses the same id).
+    pub fn init_notifications(app: &tauri::AppHandle) {
+        let app_id = app.config().identifier.clone();
+        let key = format!("Software\\Classes\\AppUserModelId\\{app_id}");
+        set_registry_string(&key, "DisplayName", crate::APP_NAME);
+        if let Ok(dir) = app.path().app_local_data_dir() {
+            let icon = dir.join("toast-icon.png");
+            let written =
+                std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&icon, TOAST_ICON));
+            if let (Ok(()), Some(path)) = (written, icon.to_str()) {
+                set_registry_string(&key, "IconUri", path);
+            }
+        }
+        let _ = APP_ID.set(HSTRING::from(app_id));
+    }
+
+    pub fn send_notification(
+        app: &tauri::AppHandle,
+        id: String,
+        title: String,
+        body: String,
+        kind: NotificationKind,
+    ) {
+        if let Err(_err) = show_toast(app, id, title, &body, kind) {
+            ipc_log!("toast failed: {_err}");
+        }
+    }
+
+    fn show_toast(
+        app: &tauri::AppHandle,
+        id: String,
+        title: String,
+        body: &str,
+        kind: NotificationKind,
+    ) -> windows::core::Result<()> {
+        let Some(app_id) = APP_ID.get() else {
+            return Ok(());
+        };
+        let document = XmlDocument::new()?;
+        document.LoadXml(&HSTRING::from(crate::toast_xml(&title, body, &kind)))?;
+        let toast = ToastNotification::CreateToastNotification(&document)?;
+        // Showing a toast with the tag and group of one still on screen
+        // replaces it, so a conversation never has two.
+        toast.SetTag(&HSTRING::from(crate::toast_tag(&id)))?;
+        toast.SetGroup(&HSTRING::from(group_for(&id)))?;
+
+        let handler_app = app.clone();
+        let handler_id = id.clone();
+        toast.Activated(&TypedEventHandler::<ToastNotification, IInspectable>::new(
+            move |_, args| {
+                let activated = args
+                    .as_ref()
+                    .and_then(|args| args.cast::<ToastActivatedEventArgs>().ok());
+                let argument = activated
+                    .as_ref()
+                    .and_then(|args| args.Arguments().ok())
+                    .map(|argument| argument.to_string())
+                    .unwrap_or_default();
+                // Text typed into the reply field (Windows 10 1903 and later).
+                let reply = activated
+                    .as_ref()
+                    .and_then(|args| args.UserInput().ok())
+                    .and_then(|input| input.Lookup(&HSTRING::from(crate::TOAST_REPLY_INPUT)).ok())
+                    .and_then(|value| value.cast::<IPropertyValue>().ok())
+                    .and_then(|value| value.GetString().ok())
+                    .map(|text| text.to_string())
+                    .unwrap_or_default();
+                on_activated(&handler_app, &handler_id, &title, &kind, &argument, reply);
+                Ok(())
+            },
+        ))?;
+
+        ToastNotificationManager::CreateToastNotifierWithId(app_id)?.Show(&toast)?;
+        if let Ok(mut guard) = toasts().lock() {
+            guard.insert(id, toast);
+        }
+        Ok(())
+    }
+
+    // Runs when a toast's body or one of its buttons is clicked. This is
+    // called on a Windows thread pool thread, not the UI thread.
+    fn on_activated(
+        app: &tauri::AppHandle,
+        id: &str,
+        title: &str,
+        kind: &NotificationKind,
+        argument: &str,
+        reply: String,
+    ) {
+        close_notification(id);
+        let quick_action = match kind {
+            NotificationKind::Conversation { quick_action } => quick_action.clone(),
+            _ => None,
+        };
+        let is_conversation = matches!(kind, NotificationKind::Conversation { .. });
+        let is_takeover = *kind == NotificationKind::Takeover;
+        let action = match argument {
+            crate::TOAST_ARG_NO if is_takeover => return,
+            crate::TOAST_ARG_REPLY if is_conversation && !reply.trim().is_empty() => {
+                Some(NotificationAction::Reply(reply))
+            }
+            crate::TOAST_ARG_QUICK if is_conversation => {
+                quick_action.map(NotificationAction::Reply)
+            }
+            crate::TOAST_ARG_READ if is_conversation => Some(NotificationAction::MarkRead),
+            _ => None,
+        };
+        match action {
+            Some(action) => crate::handle_notification_action(app, id, title, action),
+            None => crate::handle_notification_click(app, id, is_takeover),
+        }
+    }
+
+    pub fn close_notification(id: &str) {
+        if let Ok(mut guard) = toasts().lock() {
+            guard.remove(id);
+        }
+        let Some(app_id) = APP_ID.get() else {
+            return;
+        };
+        if let Ok(history) = ToastNotificationManager::History() {
+            let _ = history.RemoveGroupedTagWithId(
+                &HSTRING::from(crate::toast_tag(id)),
+                &HSTRING::from(group_for(id)),
+                app_id,
+            );
+        }
+    }
+
+    // Removes every message toast. The takeover toast is left in place: it
+    // is cleared only when the session comes back.
+    pub fn clear_notifications() {
+        if let Ok(mut guard) = toasts().lock() {
+            guard.retain(|id, _| crate::is_takeover_notification(id));
+        }
+        let Some(app_id) = APP_ID.get() else {
+            return;
+        };
+        if let Ok(history) = ToastNotificationManager::History() {
+            let _ = history.RemoveGroupWithId(&HSTRING::from(GROUP_MESSAGES), app_id);
+        }
+    }
+
+    // Removes all of the app's toasts, including the takeover one (on quit).
+    pub fn remove_all_notifications() {
+        if let Ok(mut guard) = toasts().lock() {
+            guard.clear();
+        }
+        let Some(app_id) = APP_ID.get() else {
+            return;
+        };
+        if let Ok(history) = ToastNotificationManager::History() {
+            let _ = history.ClearWithId(app_id);
+        }
+    }
+
+    // Sends a Return key press (down, then up) to the page through WebView2's
+    // DevTools protocol, which the page treats as a real key press. Returns
+    // whether the press was queued.
+    pub fn press_return(window: &tauri::WebviewWindow) -> bool {
+        use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
+
+        window
+            .with_webview(|webview| unsafe {
+                let Ok(core) = webview.controller().CoreWebView2() else {
+                    return;
+                };
+                let method = HSTRING::from("Input.dispatchKeyEvent");
+                for params in [
+                    r#"{"type":"keyDown","key":"Enter","code":"Enter","windowsVirtualKeyCode":13,"nativeVirtualKeyCode":13,"text":"\r","unmodifiedText":"\r"}"#,
+                    r#"{"type":"keyUp","key":"Enter","code":"Enter","windowsVirtualKeyCode":13,"nativeVirtualKeyCode":13}"#,
+                ] {
+                    let _ = core.CallDevToolsProtocolMethod(
+                        &method,
+                        &HSTRING::from(params),
+                        &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(()))),
+                    );
+                }
+            })
+            .is_ok()
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -2153,7 +2467,56 @@ mod tests {
         assert!(geometry.maximized);
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn toast_text_is_escaped_for_xml() {
+        assert_eq!(
+            xml_escape("<b> & \"it's\" \u{1}ok"),
+            "&lt;b&gt; &amp; &quot;it&apos;s&quot; ok"
+        );
+        let xml = toast_xml("A & B", "1 < 2", &NotificationKind::Plain);
+        assert!(xml.contains("<text>A &amp; B</text><text>1 &lt; 2</text>"));
+        assert!(!xml.contains("<actions>"));
+    }
+
+    #[test]
+    fn conversation_toast_has_reply_field_and_buttons() {
+        let kind = NotificationKind::Conversation {
+            quick_action: Some("👍".to_string()),
+        };
+        let xml = toast_xml("Bob", "hi", &kind);
+        assert!(xml.contains("<input id=\"reply\" type=\"text\""));
+        assert!(xml
+            .contains("arguments=\"reply\" activationType=\"foreground\" hint-inputId=\"reply\""));
+        assert!(xml.contains("content=\"👍\" arguments=\"quick\""));
+        assert!(xml.contains("content=\"Mark as read\" arguments=\"read\""));
+
+        let without_emoji = toast_xml(
+            "Bob",
+            "hi",
+            &NotificationKind::Conversation { quick_action: None },
+        );
+        assert!(!without_emoji.contains("arguments=\"quick\""));
+    }
+
+    #[test]
+    fn takeover_toast_offers_switch_and_no() {
+        let xml = toast_xml("Open elsewhere", "", &NotificationKind::Takeover);
+        assert!(xml.contains("content=\"Switch Here\" arguments=\"switch\""));
+        assert!(xml.contains("content=\"No\" arguments=\"no\""));
+        assert!(!xml.contains("<input"));
+    }
+
+    #[test]
+    fn toast_tags_are_short_stable_and_distinct() {
+        let tag = toast_tag("gm-conv-Some very long conversation title with emoji 🎉");
+        assert_eq!(tag.len(), 16);
+        assert_eq!(
+            tag,
+            toast_tag("gm-conv-Some very long conversation title with emoji 🎉")
+        );
+        assert_ne!(tag, toast_tag("gm-conv-Bob"));
+    }
+
     #[test]
     fn takeover_notification_ids_are_recognized() {
         assert!(is_takeover_notification(TAKEOVER_NOTIFICATION_ID));

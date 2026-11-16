@@ -13,12 +13,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read" (macOS, Linux). The reply is typed and sent through the Messages page
   only after the open conversation is confirmed to match the notification;
   otherwise the window is shown and a "Reply not sent" notification keeps the
-  text. Windows notifications are unchanged until they move to native toasts.
+  text.
   On macOS the message is sent with a real Return key press from the app,
   because the page ignores clicks and key presses simulated from script; this
   only works in the bundled app, not `npm run dev`. Linux still relies on the
   simulated path and is untested.
 - **Quick action** setting (Off / 👍 / ❤️ / 🙂) in Settings.
+- **Native Windows toasts (untested on Windows):** Windows notifications are
+  now native toasts sent from Rust, with the same reply field, quick-action
+  emoji and "Mark as read" button, and "Switch Here" / "No" on the "open on
+  another computer" alert. The app registers its AppUserModelID in the
+  registry at startup so toasts carry its name and icon, and removes its
+  toasts when it quits. Replies are sent with a real Enter key press through
+  WebView2's DevTools protocol.
+
+### Removed
+- The WebView2 web-notification path on Windows, and the automatic grant of
+  the WebView2 notification permission (microphone and camera are still
+  granted for calls).
 
 ## [1.4.0] - 2026-11-14
 

@@ -1404,6 +1404,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "webkit2gtk",
  "webview2-com",
+ "windows",
 ]
 
 [[package]]
