@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-    OnceLock,
+    Mutex, OnceLock,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WebviewUrl, WebviewWindowBuilder,
+    Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_autostart::ManagerExt;
 
@@ -38,6 +38,7 @@ macro_rules! ipc_log {
 const APP_NAME: &str = "Google Messages";
 const MAIN_WINDOW: &str = "main";
 const SETTINGS_WINDOW: &str = "settings";
+const POPOVER_WINDOW: &str = "popover";
 const TRAY_ID: &str = "main";
 // Identifier of the "open on another computer" notification.
 const TAKEOVER_NOTIFICATION_ID: &str = "gm-takeover";
@@ -60,6 +61,15 @@ const MAX_QUICK_ACTION_BYTES: usize = 32;
 // and the minimum the window can be resized (or restored) to.
 const DEFAULT_MAIN_SIZE: (f64, f64) = (1100.0, 780.0);
 const MIN_MAIN_SIZE: (f64, f64) = (400.0, 500.0);
+
+// Tray popover size and its gap from the tray icon and screen edges (logical
+// pixels), and how many recent conversations it lists.
+const POPOVER_SIZE: (f64, f64) = (360.0, 460.0);
+const POPOVER_GAP: f64 = 6.0;
+const MAX_RECENT_CONVERSATIONS: usize = 5;
+// Clicking the tray icon while the popover is open first takes focus from the
+// popover, which hides it; a click this soon after that must not reopen it.
+const POPOVER_REOPEN_GUARD: Duration = Duration::from_millis(400);
 
 // Minimum gap between watchdog-triggered reloads so auto-reload can never loop.
 const AUTO_RELOAD_COOLDOWN_SECS: u64 = 120;
@@ -128,6 +138,7 @@ static ZOOM_PERCENT: AtomicU32 = AtomicU32::new(100);
 // Live runtime flags mirrored from Settings and page state:
 static SHOW_NOTIFICATIONS: AtomicBool = AtomicBool::new(true);
 static BACKGROUND_KEEP_ALIVE: AtomicBool = AtomicBool::new(true);
+static TRAY_POPOVER: AtomicBool = AtomicBool::new(true);
 // True when "Google Messages is open on another computer" is active and the
 // user hasn't switched the session back here; while true, background keep-alive
 // and auto-refresh are paused so the OS can sleep the app normally.
@@ -136,6 +147,17 @@ static SESSION_YIELDED: AtomicBool = AtomicBool::new(false);
 static PENDING_HEARTBEAT_PINGS: AtomicU32 = AtomicU32::new(0);
 static UNHEALTHY_STREAK: AtomicU32 = AtomicU32::new(0);
 static LAST_AUTO_RELOAD_SECS: AtomicU64 = AtomicU64::new(0);
+
+// The latest conversations the page reported for the tray popover, and when
+// the popover last hid itself because it lost focus.
+static RECENT_CONVERSATIONS: Mutex<Vec<RecentConversation>> = Mutex::new(Vec::new());
+static POPOVER_HIDDEN_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
+// The tray menu on macOS, which is attached to the icon only while it is open:
+// with a menu attached, macOS opens it on a left-click too and the app never
+// sees the click.
+#[cfg(target_os = "macos")]
+static TRAY_MENU: OnceLock<Menu<tauri::Wry>> = OnceLock::new();
 
 // Notifications currently on screen on Linux, by our notification id.
 #[cfg(target_os = "linux")]
@@ -158,6 +180,41 @@ enum NotificationKind {
     Conversation { quick_action: Option<String> },
     // Anything else: no buttons, clicking opens the window.
     Plain,
+}
+
+// A conversation shown in the tray popover, as read from the page's
+// conversation list.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+struct RecentConversation {
+    title: String,
+    // The sidebar's preview of the latest message ("You: …" when it was the
+    // user's own).
+    snippet: String,
+    // Relative time as the page shows it ("2 min", "Mon"); may be empty.
+    time: String,
+    unread: bool,
+    // False when another conversation has the same name, so a reply could
+    // not be routed to the right one.
+    can_reply: bool,
+}
+
+// Everything the popover page needs to draw itself.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PopoverState {
+    conversations: Vec<RecentConversation>,
+    quick_action: String,
+    theme: Option<String>,
+}
+
+// A rectangle in physical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PxRect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
 }
 
 // Something the user did from a conversation notification without opening
@@ -188,6 +245,9 @@ struct Settings {
     background_keep_alive: bool,
     /// UI theme override: "system", "light", or "dark".
     theme: Option<String>,
+    /// When true, left-clicking the tray icon shows the recent-messages
+    /// popover; when false it shows or hides the main window.
+    tray_popover: bool,
     /// Emoji sent by the quick-action button on message notifications; empty
     /// turns the button off.
     quick_action: String,
@@ -208,6 +268,7 @@ impl Default for Settings {
             show_notifications: true,
             background_keep_alive: true,
             theme: None,
+            tray_popover: true,
             quick_action: DEFAULT_QUICK_ACTION.to_string(),
             main_window_size: None,
             launch_at_login: false,
@@ -315,6 +376,7 @@ fn parse_start_url(value: &str) -> Option<tauri::Url> {
 fn apply_runtime_flags(app: &tauri::AppHandle, settings: &Settings) {
     SHOW_NOTIFICATIONS.store(settings.show_notifications, Ordering::Relaxed);
     BACKGROUND_KEEP_ALIVE.store(settings.background_keep_alive, Ordering::Relaxed);
+    TRAY_POPOVER.store(settings.tray_popover, Ordering::Relaxed);
     sync_os_keep_alive(app);
 }
 
@@ -1128,18 +1190,20 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         ],
     )?;
 
-    #[allow(unused_mut)] // `tray` is only reassigned on macOS (template flag)
-    let mut tray = TrayIconBuilder::with_id(TRAY_ID)
+    let tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(load_base_tray_icon()?)
         .tooltip(APP_NAME)
-        .menu(&menu)
         .show_menu_on_left_click(false);
 
     // Template rendering is a macOS-only concept (light/dark menu-bar tinting).
+    // The menu is kept aside on macOS and shown on right-click (see TRAY_MENU).
     #[cfg(target_os = "macos")]
-    {
-        tray = tray.icon_as_template(true);
-    }
+    let tray = {
+        let _ = TRAY_MENU.set(menu);
+        tray.icon_as_template(true)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let tray = tray.menu(&menu);
 
     tray.on_menu_event(|app, event| match event.id().as_ref() {
         "show" => show_main_window(app),
@@ -1148,14 +1212,32 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         _ => {}
     })
     .on_tray_icon_event(|tray, event| {
-        // Left-click toggles window visibility
+        #[cfg(target_os = "macos")]
+        if let TrayIconEvent::Click {
+            button: MouseButton::Right,
+            button_state: MouseButtonState::Down,
+            ..
+        } = event
+        {
+            show_tray_menu(tray);
+            return;
+        }
+        // Left-click shows the recent-messages popover, or toggles the main
+        // window when the popover is turned off. (Linux trays don't report
+        // clicks, only the menu.)
         if let TrayIconEvent::Click {
             button: MouseButton::Left,
             button_state: MouseButtonState::Up,
+            rect,
+            position,
             ..
         } = event
         {
             let app = tray.app_handle();
+            if TRAY_POPOVER.load(Ordering::Relaxed) {
+                toggle_popover(app, rect, position);
+                return;
+            }
             if let Some(window) = main_window(app) {
                 if window.is_visible().unwrap_or(false) {
                     hide_main_window(app);
@@ -1168,6 +1250,171 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     .build(app)?;
 
     Ok(())
+}
+
+// Opens the tray menu under the icon (macOS; see TRAY_MENU). The menu is
+// attached only while it is open: showing it blocks until it closes.
+#[cfg(target_os = "macos")]
+fn show_tray_menu(tray: &tauri::tray::TrayIcon) {
+    let Some(menu) = TRAY_MENU.get().cloned() else {
+        return;
+    };
+    let tray = tray.clone();
+    // Off the event handler, which runs on the main thread these calls hop to.
+    std::thread::spawn(move || {
+        if tray.set_menu(Some(menu)).is_ok() {
+            let _ = tray.with_inner_tray_icon(|inner| inner.show_menu());
+        }
+        let _ = tray.set_menu(None::<Menu<tauri::Wry>>);
+    });
+}
+
+// =============================================================================
+// Tray popover (recent messages with quick reply)
+// =============================================================================
+
+// Where to put a `w`×`h` popover for a tray icon at `icon`, inside the
+// monitor's work area `work` (all physical pixels): centred on the icon and
+// below it when the icon is at the top of the screen (macOS menu bar), above
+// it when at the bottom, beside it when the taskbar is on the left or right.
+fn popover_position(icon: PxRect, work: PxRect, w: f64, h: f64, gap: f64) -> (f64, f64) {
+    fn clamp(value: f64, low: f64, high: f64) -> f64 {
+        if high < low {
+            low
+        } else {
+            value.clamp(low, high)
+        }
+    }
+    let (min_x, max_x) = (work.x + gap, work.x + work.w - w - gap);
+    let (min_y, max_y) = (work.y + gap, work.y + work.h - h - gap);
+    let icon_center_x = icon.x + icon.w / 2.0;
+    let icon_center_y = icon.y + icon.h / 2.0;
+    if icon.x + icon.w <= work.x {
+        return (min_x, clamp(icon_center_y - h / 2.0, min_y, max_y));
+    }
+    if icon.x >= work.x + work.w {
+        return (max_x, clamp(icon_center_y - h / 2.0, min_y, max_y));
+    }
+    let x = clamp(icon_center_x - w / 2.0, min_x, max_x);
+    let y = if icon_center_y < work.y + work.h / 2.0 {
+        icon.y + icon.h + gap
+    } else {
+        icon.y - h - gap
+    };
+    (x, clamp(y, min_y, max_y))
+}
+
+// Hides the popover and remembers when, for POPOVER_REOPEN_GUARD.
+fn hide_popover_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(POPOVER_WINDOW) {
+        let _ = window.hide();
+    }
+    if let Ok(mut hidden_at) = POPOVER_HIDDEN_AT.lock() {
+        *hidden_at = Some(Instant::now());
+    }
+}
+
+// Runs a script in the popover page, if the popover exists.
+fn eval_in_popover(app: &tauri::AppHandle, script: &str) {
+    if let Some(window) = app.get_webview_window(POPOVER_WINDOW) {
+        let _ = window.eval(script);
+    }
+}
+
+// Opens the popover next to the tray icon, or closes it if it is open.
+fn toggle_popover(app: &tauri::AppHandle, rect: tauri::Rect, click: PhysicalPosition<f64>) {
+    if let Some(window) = app.get_webview_window(POPOVER_WINDOW) {
+        if window.is_visible().unwrap_or(false) {
+            hide_popover_window(app);
+            return;
+        }
+    }
+    let just_hidden = POPOVER_HIDDEN_AT
+        .lock()
+        .ok()
+        .and_then(|hidden_at| *hidden_at)
+        .is_some_and(|at| at.elapsed() < POPOVER_REOPEN_GUARD);
+    if just_hidden {
+        return;
+    }
+
+    let monitor = app
+        .monitor_from_point(click.x, click.y)
+        .ok()
+        .flatten()
+        .or_else(|| app.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area();
+    let work = PxRect {
+        x: area.position.x as f64,
+        y: area.position.y as f64,
+        w: area.size.width as f64,
+        h: area.size.height as f64,
+    };
+    let icon_pos = rect.position.to_physical::<f64>(scale);
+    let icon_size = rect.size.to_physical::<f64>(scale);
+    let icon = if icon_size.width > 0.0 {
+        PxRect {
+            x: icon_pos.x,
+            y: icon_pos.y,
+            w: icon_size.width,
+            h: icon_size.height,
+        }
+    } else {
+        PxRect {
+            x: click.x,
+            y: click.y,
+            w: 0.0,
+            h: 0.0,
+        }
+    };
+    let (w, h) = (POPOVER_SIZE.0 * scale, POPOVER_SIZE.1 * scale);
+    let (x, y) = popover_position(icon, work, w, h, POPOVER_GAP * scale);
+    let size = PhysicalSize::new(w.round() as u32, h.round() as u32);
+    let position = PhysicalPosition::new(x.round() as i32, y.round() as i32);
+
+    let place_and_show = move |window: &tauri::WebviewWindow| {
+        let _ = window.set_size(size);
+        let _ = window.set_position(position);
+        let _ = window.show();
+        let _ = window.set_focus();
+    };
+    if let Some(window) = app.get_webview_window(POPOVER_WINDOW) {
+        place_and_show(&window);
+        let _ = window.eval("window.__gmPopoverShown && window.__gmPopoverShown();");
+        return;
+    }
+    // Built off the main thread, as for the settings window (WebView2).
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let theme = parse_theme(load_settings(&app).theme.as_deref());
+        let built = themed_window_builder(
+            &app,
+            POPOVER_WINDOW,
+            WebviewUrl::App("popover.html".into()),
+            theme,
+        )
+        .title("Recent messages")
+        .inner_size(POPOVER_SIZE.0, POPOVER_SIZE.1)
+        .decorations(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .build();
+        match built {
+            Ok(window) => place_and_show(&window),
+            Err(e) => eprintln!("[toggle_popover] failed to build popover window: {e}"),
+        }
+    });
+}
+
+// Keeps at most `max` characters of `text`.
+fn truncate_chars(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
 }
 
 // =============================================================================
@@ -1349,6 +1596,107 @@ fn grant_media_permissions(window: &tauri::WebviewWindow) {
 // =============================================================================
 // Adding a command means registering it in three places: `generate_handler!`
 // in `run` below, the command list in build.rs, and capabilities/default.json.
+
+// Called by the page whenever its list of recent incoming conversations
+// changes; the popover is updated if it exists.
+#[tauri::command]
+fn set_recent_conversations(app: tauri::AppHandle, conversations: Vec<RecentConversation>) {
+    let conversations: Vec<RecentConversation> = conversations
+        .into_iter()
+        .take(MAX_RECENT_CONVERSATIONS)
+        .map(|c| RecentConversation {
+            title: truncate_chars(&c.title, 200),
+            snippet: truncate_chars(&c.snippet, 500),
+            time: truncate_chars(&c.time, 40),
+            ..c
+        })
+        .collect();
+    ipc_log!("set_recent_conversations: {}", conversations.len());
+    if let Ok(json) = serde_json::to_string(&conversations) {
+        eval_in_popover(
+            &app,
+            &format!("window.__gmPopoverUpdate && window.__gmPopoverUpdate({json});"),
+        );
+    }
+    if let Ok(mut recent) = RECENT_CONVERSATIONS.lock() {
+        *recent = conversations;
+    }
+}
+
+#[tauri::command]
+fn get_popover_state(app: tauri::AppHandle) -> PopoverState {
+    let settings = load_settings(&app);
+    PopoverState {
+        conversations: RECENT_CONVERSATIONS
+            .lock()
+            .map(|recent| recent.clone())
+            .unwrap_or_default(),
+        quick_action: settings.quick_action,
+        theme: settings.theme,
+    }
+}
+
+// Something chosen in the popover: "reply" (with text), "read" or "open" a
+// conversation, which the page carries out and reports on through
+// popover_action_done; or "show" the main window, open "settings", or
+// "quit". Returns false for an unknown action.
+#[tauri::command]
+fn popover_action(app: tauri::AppHandle, title: String, action: String, text: String) -> bool {
+    ipc_log!("popover_action: {action}");
+    match action.as_str() {
+        "reply" | "read" => {}
+        "open" | "show" => {
+            hide_popover_window(&app);
+            show_main_window(&app);
+            if action == "show" {
+                return true;
+            }
+        }
+        "settings" => {
+            hide_popover_window(&app);
+            show_settings_window(&app);
+            return true;
+        }
+        "quit" => {
+            quit_app(&app);
+            return true;
+        }
+        _ => return false,
+    }
+    if let (Ok(title), Ok(action), Ok(text)) = (
+        serde_json::to_string(&title),
+        serde_json::to_string(&action),
+        serde_json::to_string(&text),
+    ) {
+        eval_in_main(
+            &app,
+            &format!(
+                "window.__gmPopoverAction && window.__gmPopoverAction({title}, {action}, {text});"
+            ),
+        );
+    }
+    true
+}
+
+// Called by the page when a popover action finishes; passes the outcome on.
+#[tauri::command]
+fn popover_action_done(app: tauri::AppHandle, title: String, action: String, ok: bool) {
+    ipc_log!("popover_action_done: {action} ok={ok}");
+    if let (Ok(title), Ok(action)) = (
+        serde_json::to_string(&title),
+        serde_json::to_string(&action),
+    ) {
+        eval_in_popover(
+            &app,
+            &format!("window.__gmPopoverActionDone && window.__gmPopoverActionDone({title}, {action}, {ok});"),
+        );
+    }
+}
+
+#[tauri::command]
+fn hide_popover(app: tauri::AppHandle) {
+    hide_popover_window(&app);
+}
 
 #[tauri::command]
 fn get_settings(app: tauri::AppHandle) -> Settings {
@@ -1688,6 +2036,7 @@ pub fn run() {
 
             SHOW_NOTIFICATIONS.store(settings.show_notifications, Ordering::Relaxed);
             BACKGROUND_KEEP_ALIVE.store(settings.background_keep_alive, Ordering::Relaxed);
+            TRAY_POPOVER.store(settings.tray_popover, Ordering::Relaxed);
             #[cfg(target_os = "macos")]
             macos_native::init_notifications(&handle);
             #[cfg(windows)]
@@ -1717,6 +2066,13 @@ pub fn run() {
         // Close the main window to tray instead of quitting; other windows
         // (Settings, Calls, Voicemail) close normally.
         .on_window_event(|window, event| {
+            // The popover closes when it loses focus, like a menu.
+            if window.label() == POPOVER_WINDOW {
+                if let tauri::WindowEvent::Focused(false) = event {
+                    hide_popover_window(window.app_handle());
+                }
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == MAIN_WINDOW {
                     hide_main_window(window.app_handle());
@@ -1739,7 +2095,12 @@ pub fn run() {
             set_session_yielded,
             prompt_takeover_session,
             press_enter_key,
-            log_page_diagnostic
+            log_page_diagnostic,
+            set_recent_conversations,
+            get_popover_state,
+            popover_action,
+            popover_action_done,
+            hide_popover
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -2450,6 +2811,84 @@ mod tests {
         assert!(settings.start_url.is_none());
         assert!(settings.main_window_size.is_none());
         assert_eq!(settings.quick_action, DEFAULT_QUICK_ACTION);
+        assert!(settings.tray_popover);
+    }
+
+    const WORK: PxRect = PxRect {
+        x: 0.0,
+        y: 50.0,
+        w: 2000.0,
+        h: 1000.0,
+    };
+
+    #[test]
+    fn popover_opens_below_a_menu_bar_icon() {
+        let icon = PxRect {
+            x: 1500.0,
+            y: 0.0,
+            w: 40.0,
+            h: 44.0,
+        };
+        assert_eq!(
+            popover_position(icon, WORK, 360.0, 460.0, 6.0),
+            (1340.0, 56.0)
+        );
+    }
+
+    #[test]
+    fn popover_opens_above_a_bottom_taskbar_icon_and_stays_on_screen() {
+        let work = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: 2000.0,
+            h: 1000.0,
+        };
+        let icon = PxRect {
+            x: 1980.0,
+            y: 1010.0,
+            w: 40.0,
+            h: 40.0,
+        };
+        assert_eq!(
+            popover_position(icon, work, 360.0, 460.0, 6.0),
+            (1634.0, 534.0)
+        );
+    }
+
+    #[test]
+    fn popover_opens_beside_a_side_taskbar_icon() {
+        let work = PxRect {
+            x: 100.0,
+            y: 0.0,
+            w: 1900.0,
+            h: 1000.0,
+        };
+        let icon = PxRect {
+            x: 30.0,
+            y: 900.0,
+            w: 40.0,
+            h: 40.0,
+        };
+        assert_eq!(
+            popover_position(icon, work, 360.0, 460.0, 6.0),
+            (106.0, 534.0)
+        );
+        let work = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: 1900.0,
+            h: 1000.0,
+        };
+        let icon = PxRect {
+            x: 1930.0,
+            y: 20.0,
+            w: 40.0,
+            h: 40.0,
+        };
+        assert_eq!(
+            popover_position(icon, work, 360.0, 460.0, 6.0),
+            (1534.0, 6.0)
+        );
     }
 
     #[test]

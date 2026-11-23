@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for Google Messages",
-  "windows": ["main", "settings"],
+  "windows": ["main", "settings", "popover"],
   "remote": {
     "urls": [
       "https://messages.google.com/*",
@@ -30,6 +30,11 @@
     "allow-set-session-yielded",
     "allow-prompt-takeover-session",
     "allow-press-enter-key",
-    "allow-log-page-diagnostic"
+    "allow-log-page-diagnostic",
+    "allow-set-recent-conversations",
+    "allow-get-popover-state",
+    "allow-popover-action",
+    "allow-popover-action-done",
+    "allow-hide-popover"
   ]
 }

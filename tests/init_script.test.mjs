@@ -595,3 +595,72 @@ test('reply buttons are only offered when the title matches exactly one conversa
     new page.window.Notification('Someone in a group', { body: 'hi' });
     assert.equal(last(page, 'send_native_notification').canReply, false);
 });
+
+// --- Tray popover ---
+
+test('the popover gets the recent conversations in sidebar order, including the user\'s own last messages', (t) => {
+    const page = loadPage({ title: '(1) Messages', unread: ['bob'] });
+    t.after(page.close);
+    page.sync();
+    assert.deepEqual(last(page, 'set_recent_conversations'), {
+        conversations: [
+            { title: 'Alice', snippet: 'hello', time: '', unread: false, canReply: true },
+            { title: 'Bob', snippet: 'yo', time: '', unread: true, canReply: true },
+            { title: 'Carol', snippet: 'You: ok', time: '', unread: false, canReply: true },
+        ],
+    });
+});
+
+test('the popover list is only sent again when it changes', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    page.sync();
+    const before = count(page, 'set_recent_conversations');
+    assert.ok(before >= 1);
+    page.sync();
+    assert.equal(count(page, 'set_recent_conversations'), before, 'unchanged list is not resent');
+    page.document.querySelector('#bob mws-conversation-snippet').textContent = 'You: sure';
+    page.sync();
+    assert.equal(count(page, 'set_recent_conversations'), before + 1);
+    assert.deepEqual(last(page, 'set_recent_conversations').conversations.map((c) => c.snippet),
+        ['hello', 'You: sure', 'You: ok']);
+});
+
+test('the popover does not offer a reply when two conversations share a name', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    page.document.querySelector('#carol [data-e2e-conversation-name]').textContent = 'Alice';
+    page.sync();
+    const alice = last(page, 'set_recent_conversations').conversations.filter((c) => c.title === 'Alice');
+    assert.equal(alice.length, 2);
+    assert.ok(alice.every((c) => c.canReply === false));
+});
+
+test('a reply from the popover is sent and its outcome reported back', async (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const ui = addConversationUi(page);
+    const sent = await page.window.__gmPopoverAction('Bob', 'reply', 'be there soon');
+    assert.equal(sent, true);
+    assert.deepEqual(ui.sentMessages, [{ to: 'Bob', text: 'be there soon' }]);
+    assert.deepEqual(last(page, 'popover_action_done'), { title: 'Bob', action: 'reply', ok: true });
+});
+
+test('opening a conversation from the popover selects it in the page', async (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    addConversationUi(page);
+    const opened = await page.window.__gmPopoverAction('Alice', 'open', '');
+    assert.equal(opened, true);
+    assert.ok(page.document.getElementById('alice').classList.contains('selected'));
+    assert.deepEqual(last(page, 'popover_action_done'), { title: 'Alice', action: 'open', ok: true });
+});
+
+test('a popover action for an unknown conversation reports failure', async (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    addConversationUi(page);
+    const sent = await page.window.__gmPopoverAction('Nobody', 'reply', 'hello?');
+    assert.equal(sent, false);
+    assert.deepEqual(last(page, 'popover_action_done'), { title: 'Nobody', action: 'reply', ok: false });
+});

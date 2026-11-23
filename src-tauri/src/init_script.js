@@ -347,6 +347,7 @@
     }
 
     function syncBadge() {
+        syncRecentConversations();
         // The sidebar scan is the expensive part and is only needed while the
         // title reports unread messages, so skip it in the common idle case.
         const titleCount = parseUnread(document.title);
@@ -1110,6 +1111,58 @@
         return Promise.resolve(false);
     }
 
+    // --- Recent conversations for the tray popover ---
+    // The popover lists the most recent conversations, read from the sidebar
+    // in its order (including ones where the user sent the last message).
+    // Rust keeps the latest list, so it is only sent when it changes.
+    function readRecentConversations() {
+        const items = document.querySelectorAll('mws-conversation-list-item');
+        const titleCounts = new Map();
+        for (let i = 0; i < items.length; i++) {
+            const title = getConversationTitle(items[i]);
+            if (title) titleCounts.set(title, (titleCounts.get(title) || 0) + 1);
+        }
+        const list = [];
+        for (let i = 0; i < items.length && list.length < RECENT_CONVERSATION_LIMIT; i++) {
+            const el = items[i];
+            const title = getConversationTitle(el);
+            const snippet = getConversationSnippet(el);
+            if (!title) continue;
+            list.push({
+                title: title,
+                snippet: snippet,
+                time: childText(el, 'mws-relative-timestamp, [data-e2e-conversation-timestamp]'),
+                unread: isConversationItemUnread(el),
+                canReply: titleCounts.get(title) === 1
+            });
+        }
+        return list;
+    }
+
+    function syncRecentConversations() {
+        const list = readRecentConversations();
+        const json = JSON.stringify(list);
+        if (json === lastRecentConversationsJson) return;
+        lastRecentConversationsJson = json;
+        send('set_recent_conversations', { conversations: list });
+    }
+
+    // Called from Rust when something is chosen in the popover: 'reply' (with
+    // text), 'read', or 'open' (Rust has already shown the window). Reports
+    // the outcome back so the popover can say whether it worked.
+    function handlePopoverAction(title, action, text) {
+        let done;
+        if (action === 'reply') done = replyToConversation(title, text);
+        else if (action === 'read') done = markConversationRead(title);
+        else if (action === 'open') done = openConversationByTitle(title).then(function (row) { return !!row; });
+        else done = Promise.resolve(false);
+        return done.then(function (ok) { return !!ok; }, function () { return false; }).then(function (ok) {
+            send('popover_action_done', { title: title, action: action, ok: ok });
+            syncRecentConversations();
+            return ok;
+        });
+    }
+
     // --- Background requestAnimationFrame ---
     // Keep requestAnimationFrame progressing at a low rate when hidden in the
     // tray so Angular / Google Messages flushes DOM and <title> updates when
@@ -1439,6 +1492,9 @@
     let pendingFallbackTimer = null;
     let badgeSyncTimer = null;
     const activeNotifications = new Map();
+    // Tray popover: how many conversations it lists, and the last list sent.
+    const RECENT_CONVERSATION_LIMIT = 5;
+    let lastRecentConversationsJson = null;
     // How long a new notification is exempt from read-conversation pruning.
     const PRUNE_GRACE_MS = 5000;
 
@@ -1467,6 +1523,7 @@
     // Entry points called from Rust via eval.
     window.__gmNativeNotificationClicked = nativeNotificationClicked;
     window.__gmNotificationAction = handleNotificationAction;
+    window.__gmPopoverAction = handlePopoverAction;
     window.__GM_SHOW_TAKEOVER_PROMPT = showTakeoverPrompt;
     window.__gmHeartbeat = heartbeat;
 

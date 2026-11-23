@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because the page ignores clicks and key presses simulated from script; this
   only works in the bundled app, not `npm run dev`. Linux still relies on the
   simulated path and is untested.
+- **Recent messages popover (prototype):** left-clicking the tray icon opens
+  a small window by the icon listing your five most recent conversations,
+  read from the Messages sidebar (including ones where you sent the last
+  message or reaction). The selected
+  one has a reply box (Enter sends), the quick-action emoji, "Mark as read"
+  and "Open"; the arrow keys move between conversations and Escape or
+  clicking elsewhere closes it. Its footer has Settings and Quit buttons. Replies go through the same path as
+  notification replies. Right-click still opens the tray menu, and a new
+  "Recent messages from the tray" setting switches back to the old
+  show/hide behaviour. macOS and Windows; Linux trays don't report clicks.
 - **Quick action** setting (Off / 👍 / ❤️ / 🙂) in Settings, with a "+" button
   that opens an emoji picker for any other emoji (pick from a grid, or type
   or paste one).

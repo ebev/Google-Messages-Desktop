@@ -802,6 +802,7 @@
       const TOGGLES = [
         ['launchAtLogin', 'launch_at_login', false],
         ['startInTray', 'start_in_tray', false],
+        ['trayPopover', 'tray_popover', true],
         ['showNotifications', 'show_notifications', true],
         ['backgroundKeepAlive', 'background_keep_alive', true],
       ];
@@ -911,6 +912,24 @@
             </div>
             <label class="switch">
               <input id="startInTray" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="row interactive" data-toggle-for="trayPopover">
+            <div class="row-left">
+              <div class="row-icon icon-teal" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12zM7 9h10v2H7zm0-3h10v2H7zm0 6h7v2H7z" />
+                </svg>
+              </div>
+              <div class="row-text">
+                <div class="setting-title">Recent messages from the tray</div>
+                <div class="setting-desc">Clicking the tray icon shows recent messages with a quick reply. When off, it shows or hides the window.</div>
+              </div>
+            </div>
+            <label class="switch">
+              <input id="trayPopover" type="checkbox" />
               <span class="slider"></span>
             </label>
           </div>
