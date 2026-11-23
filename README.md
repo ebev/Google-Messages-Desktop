@@ -7,7 +7,13 @@ bundling Chromium, so the app stays small.
 ## Features
 
 - Native window wrapping `messages.google.com`
-- System tray icon — left-click toggles the window, right-click for the menu
+- System tray popover — clicking or right-clicking the tray icon opens a
+  recent-messages panel (unread conversations, an inline reply box per
+  conversation that sends on Enter, the quick-action emoji, Mark as read,
+  and Settings/Quit in the footer; native popover look on macOS, tray
+  flyout on Windows). The **Recent messages from the tray** setting
+  switches back to the old show/hide click and right-click menu; Linux
+  trays don't report clicks and keep the attached menu
 - Settings window (tray menu → **Settings…**, `Ctrl+,` / `Cmd+,`, or the
   floating gear in the app): **Launch at Login**, **Start in system tray**,
   **Show desktop notifications**, **Keep connected in background**, theme
@@ -24,6 +30,13 @@ bundling Chromium, so the app stays small.
 - Native OS notifications across macOS, Windows, and Linux (including an
   unread-increase fallback when hidden) — clicking a notification unminimizes,
   unhides, and focuses the main window
+- **Reply from notifications:** macOS notifications carry a reply field (sent
+  through the page only after the open conversation is confirmed to match,
+  otherwise a "Reply not sent" notification keeps the text), a configurable
+  **Quick action** emoji (Off / 👍 / ❤️ / 🙂, or pick any from Settings),
+  and **Mark as read**. Windows notifications are native toasts with the
+  same fields (the WebView2 web-notification path was removed) and a toast
+  with a reply box stays on screen until answered or dismissed
 - Follows the system light/dark theme (or force light/dark in Settings) with a
   theme-matched cold-start background to prevent white flashes
 - Unread count surfaced via a native Windows taskbar overlay badge, macOS
