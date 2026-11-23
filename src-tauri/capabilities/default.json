@@ -32,9 +32,11 @@
     "allow-press-enter-key",
     "allow-log-page-diagnostic",
     "allow-set-recent-conversations",
+    "allow-set-connection-state",
     "allow-get-popover-state",
     "allow-popover-action",
     "allow-popover-action-done",
-    "allow-hide-popover"
+    "allow-hide-popover",
+    "allow-set-popover-height"
   ]
 }

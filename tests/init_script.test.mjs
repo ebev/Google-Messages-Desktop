@@ -604,9 +604,9 @@ test('the popover gets the recent conversations in sidebar order, including the 
     page.sync();
     assert.deepEqual(last(page, 'set_recent_conversations'), {
         conversations: [
-            { title: 'Alice', snippet: 'hello', time: '', unread: false, canReply: true },
-            { title: 'Bob', snippet: 'yo', time: '', unread: true, canReply: true },
-            { title: 'Carol', snippet: 'You: ok', time: '', unread: false, canReply: true },
+            { title: 'Alice', snippet: 'hello', photo: '', time: '', unread: false, canReply: true },
+            { title: 'Bob', snippet: 'yo', photo: '', time: '', unread: true, canReply: true },
+            { title: 'Carol', snippet: 'You: ok', photo: '', time: '', unread: false, canReply: true },
         ],
     });
 });
@@ -663,4 +663,217 @@ test('a popover action for an unknown conversation reports failure', async (t) =
     const sent = await page.window.__gmPopoverAction('Nobody', 'reply', 'hello?');
     assert.equal(sent, false);
     assert.deepEqual(last(page, 'popover_action_done'), { title: 'Nobody', action: 'reply', ok: false });
+});
+
+// --- Connection state for the popover ---
+
+test('the popover is told the page is connected, once', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    assert.deepEqual(last(page, 'set_connection_state'), { state: 'connected' });
+    page.sync();
+    assert.equal(count(page, 'set_connection_state'), 1);
+});
+
+test('the popover is told when Messages is open on another computer, and "Use here" moves it back', async (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const banner = addUseHereBanner(page.document);
+    let clicks = 0;
+    // The page drops the banner once it takes over.
+    banner.querySelector('button').addEventListener('click', () => { clicks++; banner.remove(); });
+    page.sync();
+    assert.deepEqual(last(page, 'set_connection_state'), { state: 'elsewhere' });
+
+    const moved = await page.window.__gmPopoverAction('', 'use_here', '');
+    assert.equal(moved, true);
+    assert.equal(clicks, 1);
+    assert.deepEqual(last(page, 'popover_action_done'), { title: '', action: 'use_here', ok: true });
+    assert.deepEqual(last(page, 'set_session_yielded'), { yielded: false });
+    page.sync();
+    assert.deepEqual(last(page, 'set_connection_state'), { state: 'connected' });
+});
+
+test('"Use here" from the popover fails when the page offers no such button', async (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const moved = await page.window.__gmPopoverAction('', 'use_here', '');
+    assert.equal(moved, false);
+    assert.deepEqual(last(page, 'popover_action_done'), { title: '', action: 'use_here', ok: false });
+});
+
+test('the popover is told when the computer is offline or the phone is unreachable', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const banner = page.document.createElement('mws-connection-banner');
+    banner.textContent = 'Trying to reach your phone…';
+    page.document.body.appendChild(banner);
+    page.sync();
+    assert.deepEqual(last(page, 'set_connection_state'), { state: 'phone' });
+    Object.defineProperty(page.window.navigator, 'onLine', { value: false, configurable: true });
+    page.sync();
+    assert.deepEqual(last(page, 'set_connection_state'), { state: 'offline' });
+});
+
+test('the popover is told Messages is still loading until its main UI appears', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    page.document.querySelector('mws-conversations-list').remove();
+    page.sync();
+    assert.deepEqual(last(page, 'set_connection_state'), { state: 'loading' });
+});
+
+// --- Contact photos for the popover ---
+
+function addPhoto(page, rowId, src, inside) {
+    const img = page.document.createElement('img');
+    img.src = src;
+    (inside ? page.document.querySelector('#' + rowId + ' ' + inside) : page.document.getElementById(rowId)).appendChild(img);
+}
+
+function photoOf(page, title) {
+    return last(page, 'set_recent_conversations').conversations.find((c) => c.title === title).photo;
+}
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+// Waits until `check()` is truthy (photos load through async reads whose
+// timing varies), failing after a second.
+async function waitFor(check) {
+    for (let i = 0; i < 100 && !check(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+test('the popover gets contact photos from the sidebar, and none for rows without one', async (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const photo = 'data:image/png;base64,iVBORw0KGgo=';
+    addPhoto(page, 'alice', photo);
+    page.sync();
+    await tick();
+    assert.equal(photoOf(page, 'Alice'), photo);
+    assert.equal(photoOf(page, 'Bob'), '');
+});
+
+test('photos the popover cannot load itself are read into small data URLs', async (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const fetched = [];
+    page.window.fetch = (url) => {
+        fetched.push(url);
+        return Promise.resolve({ ok: true, blob: () => Promise.resolve(new page.window.Blob(['x'], { type: 'image/png' })) });
+    };
+    addPhoto(page, 'bob', 'blob:https://messages.google.com/1234');
+    page.sync();
+    await waitFor(() => photoOf(page, 'Bob'));
+    assert.deepEqual(fetched, ['blob:https://messages.google.com/1234']);
+    assert.equal(photoOf(page, 'Bob'), 'data:image/png;base64,eA==');
+    page.sync();
+    assert.equal(fetched.length, 1, 'each photo is read once');
+});
+
+test('an https photo that cannot be read is passed on as its URL; images in the snippet are not photos', async (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    page.window.fetch = () => Promise.reject(new TypeError('CORS'));
+    addPhoto(page, 'carol', 'https://lh3.googleusercontent.com/a/carol=s64');
+    addPhoto(page, 'bob', 'https://example.com/sticker.png', 'mws-conversation-snippet');
+    page.sync();
+    await waitFor(() => photoOf(page, 'Carol'));
+    assert.equal(photoOf(page, 'Carol'), 'https://lh3.googleusercontent.com/a/carol=s64');
+    assert.equal(photoOf(page, 'Bob'), '');
+});
+
+// Adds Messages' canvas avatar to a row. jsdom can't draw, so the canvas
+// reports `alpha` at its centre and returns `url` (or throws, if tainted).
+function addCanvasAvatar(page, rowId, { alpha = 255, url = 'data:image/png;base64,Y2FudmFz', tainted = false } = {}) {
+    const container = page.document.createElement('div');
+    container.className = 'avatar-container';
+    container.innerHTML = '<mws-avatar class="avatar"><canvas class="canvas-avatar" width="80" height="80"></canvas></mws-avatar>';
+    page.document.getElementById(rowId).prepend(container);
+    const canvas = container.querySelector('canvas');
+    canvas.getContext = () => ({ getImageData: () => ({ data: [0, 0, 0, alpha] }) });
+    canvas.toDataURL = () => {
+        if (tainted) throw new page.window.DOMException('Tainted canvases may not be exported.', 'SecurityError');
+        return url;
+    };
+    return canvas;
+}
+
+test('the popover gets the avatar Messages draws on its canvas, once it is drawn', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const canvas = addCanvasAvatar(page, 'alice', { alpha: 0 });
+    page.sync();
+    assert.equal(photoOf(page, 'Alice'), '', 'not drawn yet');
+    canvas.getContext = () => ({ getImageData: () => ({ data: [0, 0, 0, 255] }) });
+    page.sync();
+    assert.equal(photoOf(page, 'Alice'), 'data:image/png;base64,Y2FudmFz');
+});
+
+test('an unreadable canvas avatar is left out', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    addCanvasAvatar(page, 'bob', { tainted: true });
+    page.sync();
+    assert.equal(photoOf(page, 'Bob'), '');
+});
+
+test('the popover hears "loading" until the conversations show, and gets the list first', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    const list = page.document.querySelector('mws-conversations-list');
+    const rows = [...list.children];
+    rows.forEach((row) => row.remove());
+    page.sync();
+    assert.deepEqual(last(page, 'set_connection_state'), { state: 'loading' });
+    rows.forEach((row) => list.appendChild(row));
+    page.sync();
+    assert.deepEqual(last(page, 'set_connection_state'), { state: 'connected' });
+    const order = page.calls.map((c) => c.cmd).filter((cmd) => cmd === 'set_recent_conversations' || cmd === 'set_connection_state');
+    assert.deepEqual(order.slice(-2), ['set_recent_conversations', 'set_connection_state']);
+    assert.equal(last(page, 'set_recent_conversations').conversations.length, 3);
+});
+
+test('with no conversations at all, the popover hears "connected" after a grace period', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    page.document.querySelectorAll('mws-conversation-list-item').forEach((row) => row.remove());
+    page.sync();
+    assert.deepEqual(last(page, 'set_connection_state'), { state: 'loading' });
+    page.advanceClock(6000);
+    page.sync();
+    assert.deepEqual(last(page, 'set_connection_state'), { state: 'connected' });
+});
+
+test('the popover gets only the form of a timestamp the page shows', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    page.document.getElementById('alice').insertAdjacentHTML('beforeend',
+        '<mws-relative-timestamp><div aria-label="Saturday">' +
+        '<span class="full">Saturday</span><span class="short" style="display:none">Sat</span>' +
+        '</div></mws-relative-timestamp>');
+    page.document.getElementById('bob').insertAdjacentHTML('beforeend',
+        '<mws-relative-timestamp><div aria-label="8 min ago"> 8 min </div></mws-relative-timestamp>');
+    page.sync();
+    const time = (title) => last(page, 'set_recent_conversations').conversations.find((c) => c.title === title).time;
+    assert.equal(time('Alice'), 'Saturday');
+    assert.equal(time('Bob'), '8 min');
+});
+
+test('timestamp text kept for screen readers, or a long form beside its short one, is left out', (t) => {
+    const page = loadPage();
+    t.after(page.close);
+    page.document.getElementById('alice').insertAdjacentHTML('beforeend',
+        '<mws-relative-timestamp><span class="cdk-visually-hidden">Saturday</span>' +
+        '<div aria-hidden="true">Sat</div></mws-relative-timestamp>');
+    page.document.getElementById('bob').insertAdjacentHTML('beforeend',
+        '<mws-relative-timestamp><span style="position:absolute;width:1px;height:1px;clip:rect(0 0 0 0)">Friday</span>' +
+        '<span>Fri</span></mws-relative-timestamp>');
+    page.document.getElementById('carol').insertAdjacentHTML('beforeend',
+        '<mws-relative-timestamp><span>Saturday</span><span>Sat</span></mws-relative-timestamp>');
+    page.sync();
+    const time = (title) => last(page, 'set_recent_conversations').conversations.find((c) => c.title === title).time;
+    assert.equal(time('Alice'), 'Sat');
+    assert.equal(time('Bob'), 'Fri');
+    assert.equal(time('Carol'), 'Sat');
 });

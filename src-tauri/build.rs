@@ -41,10 +41,12 @@ fn main() {
             "press_enter_key",
             "log_page_diagnostic",
             "set_recent_conversations",
+            "set_connection_state",
             "get_popover_state",
             "popover_action",
             "popover_action_done",
             "hide_popover",
+            "set_popover_height",
         ]),
     ))
     .expect("failed to run tauri-build");

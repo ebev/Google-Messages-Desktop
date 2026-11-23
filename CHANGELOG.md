@@ -21,13 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Recent messages popover (prototype):** left-clicking the tray icon opens
   a small window by the icon listing your five most recent conversations,
   read from the Messages sidebar (including ones where you sent the last
-  message or reaction). The selected
-  one has a reply box (Enter sends), the quick-action emoji, "Mark as read"
-  and "Open"; the arrow keys move between conversations and Escape or
+  message or reaction), with their contact photos. The selected
+  one has a reply box (Enter sends), the quick-action emoji and "Mark as
+  read"; double-click a conversation to open it. The arrow keys move between conversations and Escape or
   clicking elsewhere closes it. Its footer has Settings and Quit buttons. Replies go through the same path as
   notification replies. Right-click opens it too, so it replaces the old tray
   menu; a new "Recent messages from the tray" setting switches back to the
   old show/hide click and right-click menu. macOS and Windows; Linux trays don't report clicks.
+  It looks native on each system: a menu bar panel over the system material
+  on macOS (with the footer as menu items and ⌘O, ⌘, and ⌘Q), and a
+  Windows 11 tray flyout on Windows. It also shows whether Messages is
+  connected; when Messages is open on another computer it says "Not
+  connected" and offers "Use here" to move the session to this one, and
+  replies wait until then. It also shows when you're offline, the phone
+  can't be reached, or you aren't signed in. The window fits its content, and says it is loading
+  until Messages has shown your conversations.
 - **Quick action** setting (Off / 👍 / ❤️ / 🙂) in Settings, with a "+" button
   that opens an emoji picker for any other emoji (pick from a grid, or type
   or paste one).

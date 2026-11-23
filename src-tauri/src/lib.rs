@@ -63,10 +63,30 @@ const DEFAULT_MAIN_SIZE: (f64, f64) = (1100.0, 780.0);
 const MIN_MAIN_SIZE: (f64, f64) = (400.0, 500.0);
 
 // Tray popover size and its gap from the tray icon and screen edges (logical
-// pixels), and how many recent conversations it lists.
+// pixels), and how many recent conversations it lists. The height is a
+// maximum: the window shrinks to fit its content, down to the minimum.
 const POPOVER_SIZE: (f64, f64) = (360.0, 460.0);
+const POPOVER_MIN_HEIGHT: f64 = 160.0;
 const POPOVER_GAP: f64 = 6.0;
+// Corner radius of the macOS popover's material; keep in step with the
+// border-radius in popover.html.
+#[cfg(target_os = "macos")]
+const POPOVER_CORNER_RADIUS: f64 = 12.0;
 const MAX_RECENT_CONVERSATIONS: usize = 5;
+// Longest contact photo URL passed to the popover (the page scales photos to
+// a few KB; keep in step with MAX_PHOTO_CHARS in init_script.js).
+const MAX_PHOTO_CHARS: usize = 100_000;
+// Connection states the page may report for the popover: connected, open on
+// another computer, no internet, can't reach the phone, signed out or not
+// paired, and still loading.
+const CONNECTION_STATES: [&str; 6] = [
+    "connected",
+    "elsewhere",
+    "offline",
+    "phone",
+    "signed-out",
+    "loading",
+];
 // The right-button state that opens the popover or tray menu: macOS menus
 // open on press, Windows menus on release (the only right-click it reports).
 #[cfg(target_os = "macos")]
@@ -157,7 +177,14 @@ static LAST_AUTO_RELOAD_SECS: AtomicU64 = AtomicU64::new(0);
 // The latest conversations the page reported for the tray popover, and when
 // the popover last hid itself because it lost focus.
 static RECENT_CONVERSATIONS: Mutex<Vec<RecentConversation>> = Mutex::new(Vec::new());
+// The page's connection state for the popover footer (see CONNECTION_STATES);
+// empty until the page reports one.
+static CONNECTION_STATE: Mutex<String> = Mutex::new(String::new());
 static POPOVER_HIDDEN_AT: Mutex<Option<Instant>> = Mutex::new(None);
+// The popover's height as its page last asked for (fit to its content), and
+// the tray icon it was last opened from, so a new height keeps it anchored.
+static POPOVER_HEIGHT: Mutex<f64> = Mutex::new(POPOVER_SIZE.1);
+static POPOVER_ANCHOR: Mutex<Option<PopoverAnchor>> = Mutex::new(None);
 
 // The tray menu, attached to the icon only while it is open, so that clicks
 // reach the app and right-click can open the popover instead (with a menu
@@ -204,6 +231,8 @@ struct RecentConversation {
     // False when another conversation has the same name, so a reply could
     // not be routed to the right one.
     can_reply: bool,
+    // The contact's photo as a data:image URL (or an https URL), or empty.
+    photo: String,
 }
 
 // Everything the popover page needs to draw itself.
@@ -211,6 +240,8 @@ struct RecentConversation {
 #[serde(rename_all = "camelCase")]
 struct PopoverState {
     conversations: Vec<RecentConversation>,
+    // One of CONNECTION_STATES, or empty if the page hasn't said.
+    connection: String,
     quick_action: String,
     theme: Option<String>,
 }
@@ -222,6 +253,15 @@ struct PxRect {
     y: f64,
     w: f64,
     h: f64,
+}
+
+// Where the popover was last opened: the tray icon and its monitor's work
+// area (physical pixels), and that monitor's scale factor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PopoverAnchor {
+    icon: PxRect,
+    work: PxRect,
+    scale: f64,
 }
 
 // Something the user did from a conversation notification without opening
@@ -1320,6 +1360,32 @@ fn popover_position(icon: PxRect, work: PxRect, w: f64, h: f64, gap: f64) -> (f6
     (x, clamp(y, min_y, max_y))
 }
 
+// The popover's size and position for its tray icon, `height` logical pixels
+// tall.
+fn popover_frame(anchor: PopoverAnchor, height: f64) -> (PhysicalSize<u32>, PhysicalPosition<i32>) {
+    let scale = anchor.scale;
+    let (w, h) = (POPOVER_SIZE.0 * scale, height * scale);
+    let (x, y) = popover_position(anchor.icon, anchor.work, w, h, POPOVER_GAP * scale);
+    (
+        PhysicalSize::new(w.round() as u32, h.round() as u32),
+        PhysicalPosition::new(x.round() as i32, y.round() as i32),
+    )
+}
+
+// The popover height to use (logical pixels): the last one its page asked
+// for, or the maximum until it has.
+fn popover_height() -> f64 {
+    POPOVER_HEIGHT.lock().map(|h| *h).unwrap_or(POPOVER_SIZE.1)
+}
+
+// A popover height the page asked for, kept between the minimum and the
+// maximum; None if it isn't a number.
+fn clamp_popover_height(height: f64) -> Option<f64> {
+    height
+        .is_finite()
+        .then(|| height.clamp(POPOVER_MIN_HEIGHT, POPOVER_SIZE.1))
+}
+
 // Hides the popover and remembers when, for POPOVER_REOPEN_GUARD.
 fn hide_popover_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window(POPOVER_WINDOW) {
@@ -1387,10 +1453,11 @@ fn toggle_popover(app: &tauri::AppHandle, rect: tauri::Rect, click: PhysicalPosi
             h: 0.0,
         }
     };
-    let (w, h) = (POPOVER_SIZE.0 * scale, POPOVER_SIZE.1 * scale);
-    let (x, y) = popover_position(icon, work, w, h, POPOVER_GAP * scale);
-    let size = PhysicalSize::new(w.round() as u32, h.round() as u32);
-    let position = PhysicalPosition::new(x.round() as i32, y.round() as i32);
+    let anchor = PopoverAnchor { icon, work, scale };
+    if let Ok(mut current) = POPOVER_ANCHOR.lock() {
+        *current = Some(anchor);
+    }
+    let (size, position) = popover_frame(anchor, popover_height());
 
     let place_and_show = move |window: &tauri::WebviewWindow| {
         let _ = window.set_size(size);
@@ -1407,20 +1474,38 @@ fn toggle_popover(app: &tauri::AppHandle, rect: tauri::Rect, click: PhysicalPosi
     let app = app.clone();
     std::thread::spawn(move || {
         let theme = parse_theme(load_settings(&app).theme.as_deref());
-        let built = themed_window_builder(
+        let builder = themed_window_builder(
             &app,
             POPOVER_WINDOW,
             WebviewUrl::App("popover.html".into()),
             theme,
         )
         .title("Recent messages")
-        .inner_size(POPOVER_SIZE.0, POPOVER_SIZE.1)
+        .inner_size(POPOVER_SIZE.0, popover_height())
         .decorations(false)
         .resizable(false)
         .always_on_top(true)
         .skip_taskbar(true)
         .visible(false)
-        .build();
+        // The page picks its macOS or Windows look from this.
+        .initialization_script(format!(
+            "window.__GM_POPOVER_OS = {};",
+            serde_json::to_string(std::env::consts::OS).unwrap_or_default()
+        ));
+        // On macOS the window is see-through with the system popover material
+        // behind the page, like a menu bar extra, rounded to match its CSS.
+        #[cfg(target_os = "macos")]
+        let builder = builder
+            .transparent(true)
+            .background_color(tauri::window::Color(0, 0, 0, 0))
+            .effects(
+                tauri::window::EffectsBuilder::new()
+                    .effect(tauri::window::Effect::Popover)
+                    .state(tauri::window::EffectState::Active)
+                    .radius(POPOVER_CORNER_RADIUS)
+                    .build(),
+            );
+        let built = builder.build();
         match built {
             Ok(window) => place_and_show(&window),
             Err(e) => eprintln!("[toggle_popover] failed to build popover window: {e}"),
@@ -1615,6 +1700,17 @@ fn grant_media_permissions(window: &tauri::WebviewWindow) {
 
 // Called by the page whenever its list of recent incoming conversations
 // changes; the popover is updated if it exists.
+// Keeps a conversation photo only if it is an image data URL or an https URL
+// of a sensible size; a cut-off one would be useless.
+fn checked_photo(photo: String) -> String {
+    let allowed = photo.starts_with("data:image/") || photo.starts_with("https://");
+    if allowed && photo.len() <= MAX_PHOTO_CHARS {
+        photo
+    } else {
+        String::new()
+    }
+}
+
 #[tauri::command]
 fn set_recent_conversations(app: tauri::AppHandle, conversations: Vec<RecentConversation>) {
     let conversations: Vec<RecentConversation> = conversations
@@ -1624,6 +1720,7 @@ fn set_recent_conversations(app: tauri::AppHandle, conversations: Vec<RecentConv
             title: truncate_chars(&c.title, 200),
             snippet: truncate_chars(&c.snippet, 500),
             time: truncate_chars(&c.time, 40),
+            photo: checked_photo(c.photo),
             ..c
         })
         .collect();
@@ -1639,6 +1736,28 @@ fn set_recent_conversations(app: tauri::AppHandle, conversations: Vec<RecentConv
     }
 }
 
+// Called by the page when its connection state changes (one of
+// CONNECTION_STATES, or empty on other pages); the popover is updated if it
+// exists.
+#[tauri::command]
+fn set_connection_state(app: tauri::AppHandle, state: String) {
+    let state = if CONNECTION_STATES.contains(&state.as_str()) {
+        state
+    } else {
+        String::new()
+    };
+    ipc_log!("set_connection_state: {state}");
+    if let Ok(json) = serde_json::to_string(&state) {
+        eval_in_popover(
+            &app,
+            &format!("window.__gmPopoverConnection && window.__gmPopoverConnection({json});"),
+        );
+    }
+    if let Ok(mut current) = CONNECTION_STATE.lock() {
+        *current = state;
+    }
+}
+
 #[tauri::command]
 fn get_popover_state(app: tauri::AppHandle) -> PopoverState {
     let settings = load_settings(&app);
@@ -1647,20 +1766,25 @@ fn get_popover_state(app: tauri::AppHandle) -> PopoverState {
             .lock()
             .map(|recent| recent.clone())
             .unwrap_or_default(),
+        connection: CONNECTION_STATE
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_default(),
         quick_action: settings.quick_action,
         theme: settings.theme,
     }
 }
 
 // Something chosen in the popover: "reply" (with text), "read" or "open" a
-// conversation, which the page carries out and reports on through
+// conversation, or "use_here" to move the session from another computer to
+// this app, which the page carries out and reports on through
 // popover_action_done; or "show" the main window, open "settings", or
 // "quit". Returns false for an unknown action.
 #[tauri::command]
 fn popover_action(app: tauri::AppHandle, title: String, action: String, text: String) -> bool {
     ipc_log!("popover_action: {action}");
     match action.as_str() {
-        "reply" | "read" => {}
+        "reply" | "read" | "use_here" => {}
         "open" | "show" => {
             hide_popover_window(&app);
             show_main_window(&app);
@@ -1706,6 +1830,28 @@ fn popover_action_done(app: tauri::AppHandle, title: String, action: String, ok:
             &app,
             &format!("window.__gmPopoverActionDone && window.__gmPopoverActionDone({title}, {action}, {ok});"),
         );
+    }
+}
+
+// Called by the popover page with the height of its content (logical
+// pixels); the window is resized to fit, keeping it anchored to the tray icon
+// (on Windows, above the taskbar, its top edge moves).
+#[tauri::command]
+fn set_popover_height(app: tauri::AppHandle, height: f64) {
+    let Some(height) = clamp_popover_height(height) else {
+        return;
+    };
+    if let Ok(mut current) = POPOVER_HEIGHT.lock() {
+        if (*current - height).abs() < 0.5 {
+            return;
+        }
+        *current = height;
+    }
+    let anchor = POPOVER_ANCHOR.lock().ok().and_then(|anchor| *anchor);
+    if let (Some(window), Some(anchor)) = (app.get_webview_window(POPOVER_WINDOW), anchor) {
+        let (size, position) = popover_frame(anchor, height);
+        let _ = window.set_size(size);
+        let _ = window.set_position(position);
     }
 }
 
@@ -2113,10 +2259,12 @@ pub fn run() {
             press_enter_key,
             log_page_diagnostic,
             set_recent_conversations,
+            set_connection_state,
             get_popover_state,
             popover_action,
             popover_action_done,
-            hide_popover
+            hide_popover,
+            set_popover_height
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -2979,6 +3127,56 @@ mod tests {
             toast_tag("gm-conv-Some very long conversation title with emoji 🎉")
         );
         assert_ne!(tag, toast_tag("gm-conv-Bob"));
+    }
+
+    #[test]
+    fn popover_heights_are_kept_between_the_minimum_and_maximum() {
+        assert_eq!(clamp_popover_height(300.0), Some(300.0));
+        assert_eq!(clamp_popover_height(20.0), Some(POPOVER_MIN_HEIGHT));
+        assert_eq!(clamp_popover_height(5000.0), Some(POPOVER_SIZE.1));
+        assert_eq!(clamp_popover_height(f64::NAN), None);
+    }
+
+    #[test]
+    fn a_shorter_popover_above_the_taskbar_keeps_its_bottom_edge() {
+        let anchor = PopoverAnchor {
+            icon: PxRect {
+                x: 1800.0,
+                y: 1040.0,
+                w: 24.0,
+                h: 24.0,
+            },
+            work: PxRect {
+                x: 0.0,
+                y: 0.0,
+                w: 1920.0,
+                h: 1032.0,
+            },
+            scale: 1.0,
+        };
+        let (tall_size, tall_pos) = popover_frame(anchor, 460.0);
+        let (short_size, short_pos) = popover_frame(anchor, 300.0);
+        assert_eq!(short_size.height, 300);
+        assert_eq!(
+            tall_pos.y + tall_size.height as i32,
+            short_pos.y + short_size.height as i32
+        );
+    }
+
+    #[test]
+    fn conversation_photos_are_limited_to_images_of_a_sensible_size() {
+        let data = "data:image/png;base64,iVBORw0KGgo=".to_string();
+        assert_eq!(checked_photo(data.clone()), data);
+        let https = "https://lh3.googleusercontent.com/a/photo=s64".to_string();
+        assert_eq!(checked_photo(https.clone()), https);
+        assert_eq!(checked_photo("javascript:alert(1)".to_string()), "");
+        assert_eq!(checked_photo("http://example.com/a.png".to_string()), "");
+        assert_eq!(
+            checked_photo("blob:https://messages.google.com/x".to_string()),
+            ""
+        );
+        let huge = format!("data:image/png;base64,{}", "A".repeat(MAX_PHOTO_CHARS));
+        assert_eq!(checked_photo(huge), "");
     }
 
     #[test]

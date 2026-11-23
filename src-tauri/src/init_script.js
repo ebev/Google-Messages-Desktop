@@ -11,7 +11,8 @@
 //  - Adds a gear button that opens the app settings window
 //  - Routes target="_blank" links (in-window for Messages, OS browser otherwise)
 //  - Wraps the Notification API (native bridge, "Show notifications" setting)
-//  - Detects "open on another computer" and runs the background heartbeat
+//  - Detects "open on another computer", reports the connection state to the
+//    tray popover, and runs the background heartbeat
 //
 // Layout: every function is declared first (grouped by feature), then shared
 // state, then the startup code that wires everything together.
@@ -1131,12 +1132,149 @@
             list.push({
                 title: title,
                 snippet: snippet,
-                time: childText(el, 'mws-relative-timestamp, [data-e2e-conversation-timestamp]'),
+                photo: getConversationPhoto(el),
+                time: getConversationTime(el),
                 unread: isConversationItemUnread(el),
                 canReply: titleCounts.get(title) === 1
             });
         }
         return list;
+    }
+
+    // The sidebar row's avatar as the popover should show it. Messages draws
+    // avatars (photo or coloured letter) on a canvas; an <img> is handled too
+    // in case that changes.
+    function getConversationPhoto(el) {
+        const canvas = el.querySelector('mws-avatar canvas, .avatar-container canvas');
+        if (canvas) return canvasPhoto(canvas);
+        return conversationPhoto(getConversationPhotoSrc(el));
+    }
+
+    // The canvas as a PNG data URL, read on every sync since a redraw can't
+    // be observed. '' before it is drawn (clear in the middle) or if a
+    // cross-origin photo has made it unreadable.
+    function canvasPhoto(canvas) {
+        if (!canvas.width || !canvas.height) return '';
+        try {
+            const ctx = canvas.getContext('2d');
+            if (ctx && ctx.getImageData(canvas.width >> 1, canvas.height >> 1, 1, 1).data[3] === 0) return '';
+            const url = canvas.toDataURL('image/png');
+            return typeof url === 'string' && url.length <= MAX_PHOTO_CHARS ? url : '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    // The avatar <img>'s address, if the row has one.
+    function getConversationPhotoSrc(el) {
+        const imgs = el.querySelectorAll('img');
+        for (let i = 0; i < imgs.length; i++) {
+            const img = imgs[i];
+            if (img.closest('mws-conversation-snippet, [data-e2e-conversation-snippet]')) continue;
+            const src = img.currentSrc || img.src || '';
+            if (/^(https:|data:image\/|blob:)/.test(src)) return src;
+        }
+        return '';
+    }
+
+    // The photo as something the popover can show: a small data URL (its
+    // page can't read the Messages page's blob: URLs or cookies), else the
+    // https URL itself. '' while it loads in the background, which sends the
+    // list again when done.
+    function conversationPhoto(src) {
+        if (!src) return '';
+        if (photoCache.has(src)) return photoCache.get(src);
+        if (photoCache.size >= PHOTO_CACHE_LIMIT) photoCache.clear();
+        photoCache.set(src, '');
+        loadPhoto(src).then(function (photo) {
+            if (!photo || photoCache.get(src) !== '') return;
+            photoCache.set(src, photo);
+            syncRecentConversations();
+        });
+        return '';
+    }
+
+    function loadPhoto(src) {
+        if (/^data:image\//.test(src) && src.length <= MAX_PHOTO_CHARS) return Promise.resolve(src);
+        const fallback = /^https:/.test(src) ? src : '';
+        if (typeof fetch !== 'function') return Promise.resolve(fallback);
+        return fetch(src, { mode: 'cors', credentials: 'omit' })
+            .then(function (response) {
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                return response.blob();
+            })
+            .then(shrinkPhoto)
+            .then(function (photo) { return photo || fallback; }, function () { return fallback; });
+    }
+
+    // Square-crops and scales the image to PHOTO_SIZE pixels; if that isn't
+    // possible, uses the file as is when it is small enough.
+    function shrinkPhoto(blob) {
+        const asIs = function () { return blobToDataUrl(blob); };
+        if (typeof createImageBitmap !== 'function') return asIs();
+        return createImageBitmap(blob).then(function (bitmap) {
+            const canvas = document.createElement('canvas');
+            canvas.width = PHOTO_SIZE;
+            canvas.height = PHOTO_SIZE;
+            const side = Math.min(bitmap.width, bitmap.height);
+            canvas.getContext('2d').drawImage(bitmap,
+                (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side,
+                0, 0, PHOTO_SIZE, PHOTO_SIZE);
+            const url = canvas.toDataURL('image/png');
+            return url.length <= MAX_PHOTO_CHARS ? url : '';
+        }).catch(asIs);
+    }
+
+    function blobToDataUrl(blob) {
+        if (!/^image\//.test(blob.type) || blob.size * 1.4 > MAX_PHOTO_CHARS) return Promise.resolve('');
+        return new Promise(function (resolve) {
+            const reader = new FileReader();
+            reader.onload = function () { resolve(String(reader.result || '')); };
+            reader.onerror = function () { resolve(''); };
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    // The row's time as shown ("8 min", "Sat"). The timestamp holds more than
+    // one form (e.g. "Saturday" for screen readers and "Sat" on screen), so
+    // text hidden by style or kept for screen readers only is skipped; layout
+    // can't be relied on since the window is usually hidden in the tray. If a
+    // long and short form of the same word are both left, the short one (the
+    // sidebar's style) is kept.
+    function getConversationTime(el) {
+        const stamp = el.querySelector('mws-relative-timestamp, [data-e2e-conversation-timestamp]');
+        if (!stamp) return '';
+        const walker = document.createTreeWalker(stamp, NodeFilter.SHOW_TEXT);
+        const parts = [];
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const text = node.nodeValue.trim();
+            if (text && !isHiddenByStyle(node.parentElement, stamp)) parts.push(text);
+        }
+        const shown = parts.filter(function (part) {
+            const lower = part.toLowerCase();
+            return !parts.some(function (other) {
+                return other.length < part.length && lower.indexOf(other.toLowerCase()) === 0;
+            });
+        });
+        return shown.join(' ') || (stamp.textContent || '').trim();
+    }
+
+    // Whether `el` or an ancestor up to `root` is hidden (display:none,
+    // visibility:hidden) or only there for screen readers (the usual
+    // "visually hidden" class, or a clipped box of a pixel or less).
+    function isHiddenByStyle(el, root) {
+        for (let cur = el; cur; cur = cur.parentElement) {
+            const style = getComputedStyle(cur);
+            if (style.display === 'none' || style.visibility === 'hidden') return true;
+            if (cur.classList && /(^|\s)(cdk-visually-hidden|visually-hidden|sr-only)(\s|$)/.test(cur.className)) return true;
+            const clipped = (style.clip && style.clip !== 'auto') || /inset|polygon/.test(style.clipPath || '');
+            if (clipped && (style.position === 'absolute' || style.position === 'fixed') &&
+                (parseFloat(style.width) <= 1 || parseFloat(style.height) <= 1)) {
+                return true;
+            }
+            if (cur === root) break;
+        }
+        return false;
     }
 
     function syncRecentConversations() {
@@ -1148,13 +1286,15 @@
     }
 
     // Called from Rust when something is chosen in the popover: 'reply' (with
-    // text), 'read', or 'open' (Rust has already shown the window). Reports
+    // text), 'read', 'open' (Rust has already shown the window), or
+    // 'use_here' (move the session here; title is empty). Reports
     // the outcome back so the popover can say whether it worked.
     function handlePopoverAction(title, action, text) {
         let done;
         if (action === 'reply') done = replyToConversation(title, text);
         else if (action === 'read') done = markConversationRead(title);
         else if (action === 'open') done = openConversationByTitle(title).then(function (row) { return !!row; });
+        else if (action === 'use_here') done = Promise.resolve(useSessionHere());
         else done = Promise.resolve(false);
         return done.then(function (ok) { return !!ok; }, function () { return false; }).then(function (ok) {
             send('popover_action_done', { title: title, action: action, ok: ok });
@@ -1295,17 +1435,68 @@
         document.body.appendChild(overlay);
     }
 
+    function hasMainUi() {
+        return !!document.querySelector('mws-conversations-list, mw-main-nav, [data-e2e-conversation-list]');
+    }
+
     function checkSessionState() {
-        if (!onMessagesHost()) return;
         const other = detectOtherSession();
+        syncConnectionState(other);
+        if (!onMessagesHost()) return;
         if (other) {
             syncSessionYielded(true);
-        } else if (localSessionYielded) {
-            const hasMainUi = !!document.querySelector('mws-conversations-list, mw-main-nav, [data-e2e-conversation-list]');
-            if (hasMainUi) {
-                syncSessionYielded(false);
-            }
+        } else if (localSessionYielded && hasMainUi()) {
+            syncSessionYielded(false);
         }
+    }
+
+    // Clicks the page's own "Use here" button, moving the session from the
+    // other computer to this app. False when the button isn't showing.
+    function useSessionHere() {
+        const btn = findUseHereButton();
+        if (!btn) return false;
+        const modal = document.getElementById(TAKEOVER_MODAL_ID);
+        if (modal) modal.remove();
+        btn.click();
+        syncSessionYielded(false);
+        return true;
+    }
+
+    // --- Connection state for the tray popover ---
+    // 'connected'; 'elsewhere' (open on another computer, which "Use here"
+    // undoes); 'offline'; 'phone' (the page can't reach the phone);
+    // 'signed-out' (Google sign-in or the pairing page); 'loading' (Messages
+    // before its conversations show, so the popover doesn't call the list
+    // empty while it fills); or '' on any other page. Rust keeps the latest
+    // state, so it is only sent when it changes.
+    function readConnectionState(otherSession) {
+        if (location.host === 'accounts.google.com') return 'signed-out';
+        if (!onMessagesHost()) return '';
+        if (otherSession) return 'elsewhere';
+        if (navigator.onLine === false) return 'offline';
+        if (detectConnectionProblem()) return 'phone';
+        if (hasMainUi()) {
+            if (!mainUiSeenAt) mainUiSeenAt = Date.now();
+            if (document.querySelector('mws-conversation-list-item') ||
+                Date.now() - mainUiSeenAt >= EMPTY_LIST_GRACE_MS) {
+                return 'connected';
+            }
+            return 'loading';
+        }
+        if (location.pathname.indexOf('/authentication') !== -1 ||
+            document.querySelector('mw-qr-code, mws-qr-code, [data-e2e-qr-code]')) {
+            return 'signed-out';
+        }
+        return 'loading';
+    }
+
+    function syncConnectionState(otherSession) {
+        const state = readConnectionState(otherSession);
+        if (state === lastConnectionState) return;
+        lastConnectionState = state;
+        // The popover gets the list before hearing it is connected.
+        if (state === 'connected') syncRecentConversations();
+        send('set_connection_state', { state: state });
     }
 
     // --- Background Heartbeat & Connection Watchdog ---
@@ -1495,6 +1686,14 @@
     // Tray popover: how many conversations it lists, and the last list sent.
     const RECENT_CONVERSATION_LIMIT = 5;
     let lastRecentConversationsJson = null;
+    // Contact photos for the popover from <img> avatars: src -> what to send
+    // ('' while loading or unreadable). Photos are scaled to PHOTO_SIZE pixels square
+    // (twice the popover's largest avatar); keep MAX_PHOTO_CHARS in step with
+    // MAX_PHOTO_CHARS in lib.rs.
+    const photoCache = new Map();
+    const PHOTO_CACHE_LIMIT = 50;
+    const PHOTO_SIZE = 64;
+    const MAX_PHOTO_CHARS = 100000;
     // How long a new notification is exempt from read-conversation pruning.
     const PRUNE_GRACE_MS = 5000;
 
@@ -1505,6 +1704,12 @@
     // Session-takeover tracking
     let localSessionYielded = false;
     let sessionCheckTimer = null;
+    // The connection state last sent to Rust for the tray popover, and when
+    // the main UI first showed; with no conversations after the grace period
+    // the list really is empty.
+    let lastConnectionState = null;
+    let mainUiSeenAt = 0;
+    const EMPTY_LIST_GRACE_MS = 5000;
     const SESSION_CHECK_DELAY_MS = 150;
 
     // Observers
@@ -1540,6 +1745,8 @@
     document.addEventListener('keydown', handleKeydown, true);
     window.addEventListener('focus', syncBadgeOnFocus);
     window.addEventListener('online', reloadIfStalledAfterReconnect);
+    window.addEventListener('online', scheduleSessionCheck);
+    window.addEventListener('offline', scheduleSessionCheck);
     setInterval(syncBadge, 2500);
 
     if (document.readyState === 'loading') {

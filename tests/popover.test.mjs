@@ -16,18 +16,19 @@ const CONVERSATIONS = [
     { title: 'Bob', snippet: 'yo', time: 'Mon', unread: false, canReply: true },
 ];
 
-async function loadPopover({ conversations = CONVERSATIONS, quickAction = '👍' } = {}) {
+async function loadPopover({ conversations = CONVERSATIONS, quickAction = '👍', connection = 'connected', os } = {}) {
     const calls = [];
     const dom = new JSDOM(HTML, {
         runScripts: 'dangerously',
         pretendToBeVisual: true,
         beforeParse(window) {
             window.matchMedia = () => ({ matches: false, addEventListener() {} });
+            if (os) window.__GM_POPOVER_OS = os;
             window.__TAURI_INTERNALS__ = {
                 invoke(cmd, args) {
                     calls.push({ cmd, args: args === undefined ? null : JSON.parse(JSON.stringify(args)) });
                     if (cmd === 'get_popover_state') {
-                        return Promise.resolve({ conversations, quickAction, theme: null });
+                        return Promise.resolve({ conversations, quickAction, connection, theme: null });
                     }
                     return Promise.resolve(true);
                 },
@@ -114,19 +115,21 @@ test('clicking another conversation moves the reply box and keeps each draft', a
     assert.equal(p.input().value, 'draft for alice');
 });
 
-test('the quick action, mark as read and open buttons act on the selected conversation', async (t) => {
+test('the quick action and mark as read act on the selected conversation; double-click opens it', async (t) => {
     const p = await loadPopover();
     t.after(p.close);
+    const labels = () => [...p.document.querySelectorAll('.reply-actions button')].map((b) => b.textContent);
     const button = (label) => [...p.document.querySelectorAll('.reply-actions button')]
         .find((b) => b.textContent === label);
+    assert.deepEqual(labels(), ['👍', 'Mark as read'], 'no Open button');
     button('👍').click();
     assert.deepEqual(p.sent('popover_action').at(-1), { title: 'Alice', action: 'reply', text: '👍' });
     p.window.__gmPopoverActionDone('Alice', 'reply', true);
     button('Mark as read').click();
     assert.deepEqual(p.sent('popover_action').at(-1), { title: 'Alice', action: 'read', text: '' });
     p.window.__gmPopoverActionDone('Alice', 'read', true);
-    button('Open').click();
-    assert.deepEqual(p.sent('popover_action').at(-1), { title: 'Alice', action: 'open', text: '' });
+    p.cards()[1].dispatchEvent(new p.window.MouseEvent('dblclick', { bubbles: true }));
+    assert.deepEqual(p.sent('popover_action').at(-1), { title: 'Bob', action: 'open', text: '' });
 });
 
 test('the footer opens settings and quits', async (t) => {
@@ -156,4 +159,142 @@ test('updates from the page replace the list and Escape hides the popover', asyn
     assert.match(p.document.querySelector('.empty').textContent, /No recent messages/);
     p.key('Escape', p.document.body);
     assert.equal(p.sent('hide_popover').length, 1);
+});
+
+// --- Connection status ---
+
+function statusText(p) {
+    return p.document.getElementById('status').textContent;
+}
+
+function useHereButton(p) {
+    return p.document.getElementById('useHere');
+}
+
+test('the status bar says when Messages is connected', async (t) => {
+    const p = await loadPopover();
+    t.after(p.close);
+    assert.equal(statusText(p), 'Connected');
+    assert.equal(p.document.getElementById('statusBar').dataset.conn, 'connected');
+    assert.ok(useHereButton(p).hidden);
+});
+
+test('an action outcome shows for a while, then the connection comes back', async (t) => {
+    const p = await loadPopover();
+    t.after(p.close);
+    p.type('hi');
+    p.key('Enter', p.input());
+    p.window.__gmPopoverActionDone('Alice', 'reply', true);
+    assert.equal(statusText(p), 'Sent to Alice');
+    await new Promise((resolve) => setTimeout(resolve, 4100));
+    assert.equal(statusText(p), 'Connected');
+});
+
+test('when open on another computer, "Use here" moves the session and replies wait for it', async (t) => {
+    const p = await loadPopover({ connection: 'elsewhere' });
+    t.after(p.close);
+    assert.equal(statusText(p), 'Not connected');
+    assert.ok(!useHereButton(p).hidden);
+    assert.ok(p.input().disabled, 'no replying while the session is elsewhere');
+    assert.match(p.document.querySelector('.note').textContent, /another computer/);
+
+    useHereButton(p).click();
+    assert.deepEqual(p.sent('popover_action').at(-1), { title: '', action: 'use_here', text: '' });
+    assert.equal(statusText(p), 'Moving Messages here…');
+    assert.ok(useHereButton(p).hidden);
+
+    p.window.__gmPopoverActionDone('', 'use_here', true);
+    p.window.__gmPopoverConnection('loading');
+    assert.equal(statusText(p), 'Moving Messages here…', 'still waiting while the page reloads');
+    p.window.__gmPopoverConnection('connected');
+    assert.equal(statusText(p), 'Connected');
+    assert.ok(useHereButton(p).hidden);
+    assert.ok(!p.input().disabled);
+});
+
+test('"Use here" says so when the page could not move the session', async (t) => {
+    const p = await loadPopover({ connection: 'elsewhere' });
+    t.after(p.close);
+    useHereButton(p).click();
+    p.window.__gmPopoverActionDone('', 'use_here', false);
+    assert.match(statusText(p), /Couldn’t move Messages here/);
+    assert.equal(p.document.getElementById('status').className, 'err');
+    assert.ok(!useHereButton(p).hidden, 'can try again');
+});
+
+test('other connection problems are shown without "Use here"', async (t) => {
+    const p = await loadPopover({ connection: 'phone' });
+    t.after(p.close);
+    assert.equal(statusText(p), 'Can’t reach your phone');
+    assert.ok(useHereButton(p).hidden);
+    p.window.__gmPopoverConnection('offline');
+    assert.equal(statusText(p), 'Offline');
+    p.window.__gmPopoverConnection('');
+    assert.equal(statusText(p), 'Connecting…');
+});
+
+// --- Platform looks ---
+
+test('macOS gets the menu bar panel look with the status by the title', async (t) => {
+    const p = await loadPopover({ os: 'macos' });
+    t.after(p.close);
+    assert.ok(p.document.documentElement.classList.contains('mac'));
+    assert.equal(p.document.getElementById('statusBar').parentElement.tagName, 'HEADER');
+    p.key(',', p.input());
+    assert.equal(p.sent('popover_action').length, 0, 'plain keys are typed');
+    p.document.activeElement.dispatchEvent(
+        new p.window.KeyboardEvent('keydown', { key: ',', metaKey: true, bubbles: true, cancelable: true }));
+    assert.deepEqual(p.sent('popover_action').at(-1), { title: '', action: 'settings', text: '' });
+});
+
+test('Windows gets the tray flyout look with the status in the footer', async (t) => {
+    const p = await loadPopover({ os: 'windows' });
+    t.after(p.close);
+    assert.ok(p.document.documentElement.classList.contains('win'));
+    assert.equal(p.document.getElementById('statusBar').parentElement.tagName, 'FOOTER');
+});
+
+test('avatars show initials, or a person icon for numbers', async (t) => {
+    const p = await loadPopover({
+        conversations: [
+            { title: 'Jamie Moore', snippet: 'hi', time: '', unread: false, canReply: true },
+            { title: '73981', snippet: 'code', time: '', unread: false, canReply: true },
+        ],
+    });
+    t.after(p.close);
+    const avatars = [...p.document.querySelectorAll('.avatar')];
+    assert.equal(avatars[0].textContent, 'JM');
+    assert.ok(avatars[1].querySelector('svg'));
+});
+
+test('avatars show the contact photo, and initials if it fails to load', async (t) => {
+    const photo = 'data:image/png;base64,iVBORw0KGgo=';
+    const p = await loadPopover({
+        conversations: [
+            { title: 'Jamie Moore', snippet: 'hi', time: '', unread: false, canReply: true, photo },
+            { title: 'Alex Lin', snippet: 'yo', time: '', unread: false, canReply: true, photo: 'javascript:alert(1)' },
+        ],
+    });
+    t.after(p.close);
+    const avatars = [...p.document.querySelectorAll('.avatar')];
+    const img = avatars[0].querySelector('img');
+    assert.equal(img.getAttribute('src'), photo);
+    assert.equal(avatars[1].querySelector('img'), null, 'only image data and https URLs are used');
+    assert.equal(avatars[1].textContent, 'AL');
+    img.dispatchEvent(new p.window.Event('error'));
+    assert.equal(avatars[0].querySelector('img'), null);
+    assert.equal(avatars[0].textContent, 'JM');
+});
+
+test('an empty list says it is loading until Messages has its conversations', async (t) => {
+    const p = await loadPopover({ conversations: [], connection: 'loading' });
+    t.after(p.close);
+    const emptyText = () => p.document.querySelector('.empty').textContent;
+    assert.match(emptyText(), /Loading conversations/);
+    p.window.__gmPopoverConnection('signed-out');
+    assert.match(emptyText(), /Not signed in/);
+    p.window.__gmPopoverConnection('connected');
+    assert.match(emptyText(), /No recent messages/);
+    p.window.__gmPopoverUpdate(CONVERSATIONS);
+    assert.equal(p.cards().length, 2);
 });
