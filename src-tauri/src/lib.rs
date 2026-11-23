@@ -67,6 +67,12 @@ const MIN_MAIN_SIZE: (f64, f64) = (400.0, 500.0);
 const POPOVER_SIZE: (f64, f64) = (360.0, 460.0);
 const POPOVER_GAP: f64 = 6.0;
 const MAX_RECENT_CONVERSATIONS: usize = 5;
+// The right-button state that opens the popover or tray menu: macOS menus
+// open on press, Windows menus on release (the only right-click it reports).
+#[cfg(target_os = "macos")]
+const TRAY_MENU_BUTTON_STATE: MouseButtonState = MouseButtonState::Down;
+#[cfg(windows)]
+const TRAY_MENU_BUTTON_STATE: MouseButtonState = MouseButtonState::Up;
 // Clicking the tray icon while the popover is open first takes focus from the
 // popover, which hides it; a click this soon after that must not reopen it.
 const POPOVER_REOPEN_GUARD: Duration = Duration::from_millis(400);
@@ -153,10 +159,11 @@ static LAST_AUTO_RELOAD_SECS: AtomicU64 = AtomicU64::new(0);
 static RECENT_CONVERSATIONS: Mutex<Vec<RecentConversation>> = Mutex::new(Vec::new());
 static POPOVER_HIDDEN_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
-// The tray menu on macOS, which is attached to the icon only while it is open:
-// with a menu attached, macOS opens it on a left-click too and the app never
-// sees the click.
-#[cfg(target_os = "macos")]
+// The tray menu, attached to the icon only while it is open, so that clicks
+// reach the app and right-click can open the popover instead (with a menu
+// attached, macOS opens it on a left-click too and the app never sees the
+// click). Linux trays report no clicks, so there the menu stays attached.
+#[cfg(not(target_os = "linux"))]
 static TRAY_MENU: OnceLock<Menu<tauri::Wry>> = OnceLock::new();
 
 // Notifications currently on screen on Linux, by our notification id.
@@ -1196,13 +1203,12 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false);
 
     // Template rendering is a macOS-only concept (light/dark menu-bar tinting).
-    // The menu is kept aside on macOS and shown on right-click (see TRAY_MENU).
     #[cfg(target_os = "macos")]
-    let tray = {
-        let _ = TRAY_MENU.set(menu);
-        tray.icon_as_template(true)
-    };
-    #[cfg(not(target_os = "macos"))]
+    let tray = tray.icon_as_template(true);
+    // The menu is kept aside and shown on right-click (see TRAY_MENU).
+    #[cfg(not(target_os = "linux"))]
+    let _ = TRAY_MENU.set(menu);
+    #[cfg(target_os = "linux")]
     let tray = tray.menu(&menu);
 
     tray.on_menu_event(|app, event| match event.id().as_ref() {
@@ -1212,14 +1218,24 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         _ => {}
     })
     .on_tray_icon_event(|tray, event| {
-        #[cfg(target_os = "macos")]
+        // Right-click opens the popover too, so it is the one tray menu; the
+        // old menu is only for when the popover is turned off.
+        #[cfg(not(target_os = "linux"))]
         if let TrayIconEvent::Click {
             button: MouseButton::Right,
-            button_state: MouseButtonState::Down,
+            button_state,
+            rect,
+            position,
             ..
         } = event
         {
-            show_tray_menu(tray);
+            if button_state == TRAY_MENU_BUTTON_STATE {
+                if TRAY_POPOVER.load(Ordering::Relaxed) {
+                    toggle_popover(tray.app_handle(), rect, position);
+                } else {
+                    show_tray_menu(tray);
+                }
+            }
             return;
         }
         // Left-click shows the recent-messages popover, or toggles the main
@@ -1252,9 +1268,9 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-// Opens the tray menu under the icon (macOS; see TRAY_MENU). The menu is
-// attached only while it is open: showing it blocks until it closes.
-#[cfg(target_os = "macos")]
+// Opens the tray menu at the icon (see TRAY_MENU). The menu is attached only
+// while it is open: showing it blocks until it closes.
+#[cfg(not(target_os = "linux"))]
 fn show_tray_menu(tray: &tauri::tray::TrayIcon) {
     let Some(menu) = TRAY_MENU.get().cloned() else {
         return;

@@ -25,9 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one has a reply box (Enter sends), the quick-action emoji, "Mark as read"
   and "Open"; the arrow keys move between conversations and Escape or
   clicking elsewhere closes it. Its footer has Settings and Quit buttons. Replies go through the same path as
-  notification replies. Right-click still opens the tray menu, and a new
-  "Recent messages from the tray" setting switches back to the old
-  show/hide behaviour. macOS and Windows; Linux trays don't report clicks.
+  notification replies. Right-click opens it too, so it replaces the old tray
+  menu; a new "Recent messages from the tray" setting switches back to the
+  old show/hide click and right-click menu. macOS and Windows; Linux trays don't report clicks.
 - **Quick action** setting (Off / 👍 / ❤️ / 🙂) in Settings, with a "+" button
   that opens an emoji picker for any other emoji (pick from a grid, or type
   or paste one).
