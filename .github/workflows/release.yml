@@ -139,6 +139,28 @@ jobs:
           esac
           printf 'Found: %s\n' "${artifacts[@]}"
 
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)
+          # Release assets carry the OS and arch ("Google-Messages-1.6.0-linux-amd64.deb")
+          # so the release page reads as a platform list; hyphens only, so no
+          # GitHub space-to-dot mangling.
+          target_name() {
+            case "$OS" in
+              ubuntu-latest)
+                case "$(basename "$1")" in
+                  *.deb) echo "Google-Messages-$ver-linux-amd64.deb" ;;
+                  *.rpm) echo "Google-Messages-$ver-linux-x86_64.rpm" ;;
+                esac ;;
+              macos-latest) echo "Google-Messages-$ver-macos-aarch64.dmg" ;;
+              windows-latest)
+                case "$TARCH" in
+                  aarch64-*) echo "Google-Messages-$ver-windows-arm64-setup.exe" ;;
+                  *) echo "Google-Messages-$ver-windows-x64-setup.exe" ;;
+                esac ;;
+            esac
+          }
+          expected=()
+          for f in "${artifacts[@]}"; do expected+=("$(target_name "$f")"); done
+
           auth="Authorization: Bearer $TOKEN"
           resp=$(mktemp)
 
@@ -177,9 +199,7 @@ jobs:
           echo "Using release $id for $tag"
 
           for f in "${artifacts[@]}"; do
-            name=$(basename "$f")
-            # GitHub replaces spaces with dots in release asset names.
-            name="${name// /.}"
+            name=$(target_name "$f")
             # Re-upload safety: delete any existing asset with the same name,
             # so a re-run replaces packages instead of failing on a duplicate.
             del_ids=$(curl -sS -H "$auth" "$API/releases/$id/assets" | python3 -c "import json,sys; asset_name=sys.argv[1]; print('\n'.join(str(a['id']) for a in json.load(sys.stdin) if a.get('name')==asset_name))" "$name")
@@ -208,4 +228,4 @@ jobs:
             echo "Asset listing failed (HTTP $code):"
             cat "$resp"; exit 1
           fi
-          python3 -c "import json,sys; a=json.load(open(sys.argv[1])); e=sorted(f.rsplit('/',1)[-1].replace(' ', '.') for f in sys.argv[3:]); h=sorted(x['name'] for x in a); m=[n for n in e if n not in h]; print(('FAILED' if m else 'PASSED'), sys.argv[2], 'expected', e, 'missing', m); sys.exit(1 if m else 0)" "$resp" "$OS" "${artifacts[@]}"
+          python3 -c "import json,sys; a=json.load(open(sys.argv[1])); e=sorted(f.rsplit('/',1)[-1].replace(' ', '.') for f in sys.argv[3:]); h=sorted(x['name'] for x in a); m=[n for n in e if n not in h]; print(('FAILED' if m else 'PASSED'), sys.argv[2], 'expected', e, 'missing', m); sys.exit(1 if m else 0)" "$resp" "$OS" "${expected[@]}"
