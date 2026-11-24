@@ -6,7 +6,8 @@ Goal: modernise the toolchain (the CI pins Node 22, two LTS lines behind 24/26),
 match Texty's copy-on-demand verification codes from notifications, and accept
 files dropped onto the window.
 
-Status: scoped 2026-11-24; not started. Each item ends with its own device check.
+Status: scoped 2026-11-24; implemented, not yet run on a device or in CI on
+Node 24. Each item ends with its own device check.
 
 ### 1. Node upgrade (CI, then local)
 - [x] **Bump the test runner:** `actions/setup-node@v4` + `node-version: 22` →
@@ -50,14 +51,19 @@ Status: scoped 2026-11-24; not started. Each item ends with its own device check
 - [ ] Device check: copy a real sign-in code from the toast on macOS + Windows.
 
 ### 3. Drag-and-drop attachments
-- **Mechanism gate — probe first:** does messages.google.com attach a file
-  dropped onto the composer in a plain browser? If YES → set
-  `dragDropEnabled: false` on the main window so the webview receives HTML5
-  drag events (one config line, the page does the work). If NO → keep it
-  enabled and handle `DragDropEvent` in `lib.rs`: read the paths, then feed
-  the page's attachment input from `init_script.js` (DataTransfer + `change`
-  dispatch). Do not build the Rust path until the probe says it is needed.
-- [ ] **Multi-file drops** accepted; document the chosen mechanism here.
+- [x] **Mechanism gate — probe first:** probed by the owner: a plain browser
+  attaches a dropped file; in the app the page shows its "+" drop overlay but
+  the drop never attaches, because Tauri's drag-drop handler takes the drop.
+  **Mechanism (done):** the main window is built in code, not in
+  `tauri.conf.json` (`"windows": []`), so this is a builder call, not a config
+  line: `.disable_drag_drop_handler()` in `build_main_window` (tauri 2.11.2;
+  the builder has no `drag_drop_enabled(bool)`). In wry 0.55.1 with no
+  handler, macOS passes the drop to WKWebView's own `performDragOperation`,
+  Windows registers no drop target over WebView2, and WebKitGTK keeps its
+  default — the page does the work. No `DragDropEvent` handling in Rust;
+  settings and popover windows unchanged.
+- [ ] **Multi-file drops** accepted (the page handles them; device check
+  below). Mechanism documented above.
 - [ ] Device check: Finder drop → attaches (macOS), Explorer drop → attaches
   (Windows), and a drop while the window is in the tray behaves sanely.
 

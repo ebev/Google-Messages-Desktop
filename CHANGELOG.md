@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   like `G-123456`) gets a "Copy code" button on macOS, Windows and Linux.
   Pressing it copies the digits (`123456` for `G-123456`) to the clipboard
   without opening the window.
+- **Drag files onto the window to attach them:** files dropped on an open
+  chat now reach the Messages page, which attaches them to the composer.
+  Tauri's own drag-drop handler is turned off for the main window; before,
+  it took the drop and the page only saw the drag.
 
 ### Changed
 - CI runs the page-script tests on Node 24 (was 22), and the workflows use

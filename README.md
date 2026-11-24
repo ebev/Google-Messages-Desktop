@@ -45,6 +45,8 @@ native-feeling, and complete as a desktop citizen.
   and **Mark as read**. Windows notifications are native toasts with the
   same fields (the WebView2 web-notification path was removed) and a toast
   with a reply box stays on screen until answered or dismissed
+- **Drag and drop files:** drop files (one or several) from Finder or
+  Explorer onto an open chat to attach them, as in the browser
 - **Copy verification codes from the notification:** when a message
   notification carries a code (`482913`, or `G-123456`, which copies
   `123456`), it gets a **Copy code** button that puts the code on the

@@ -2242,6 +2242,10 @@ fn build_main_window(
     .min_inner_size(MIN_MAIN_SIZE.0, MIN_MAIN_SIZE.1)
     .visible(!settings.start_in_tray)
     .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
+    // Files dropped on the window go to the page, which attaches them to the
+    // open chat. Tauri's own drag-drop handler would take the drop and the
+    // page would only ever see the drag, never the files.
+    .disable_drag_drop_handler()
     .initialization_script_for_all_frames(&init_script);
     #[cfg(not(target_os = "macos"))]
     {
