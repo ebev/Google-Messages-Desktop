@@ -60,7 +60,7 @@ Node 24. Each item ends with its own device check.
   appears only when a code matches, and that the copied text is the code alone.
   (Toast-XML test covers the button; the copied text is pinned by the detector
   tests. The macOS/Linux builders and the clipboard write have no unit test.)
-- [ ] Device check: copy a real sign-in code from the toast on macOS + Windows.
+- [x] Device check (macOS, 2026-11-23): copy a real sign-in code from the toast — done; Windows pending.
 
 ### 3. Drag-and-drop attachments
 - [x] **Mechanism gate — probe first:** probed by the owner: a plain browser
