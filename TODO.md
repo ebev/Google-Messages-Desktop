@@ -21,14 +21,32 @@ Status: scoped 2026-11-24; not started. Each item ends with its own device check
   links Node.js — no version named, left unchanged.)
 
 ### 2. Auto code copy (copy-on-demand)
-- [ ] **Detection:** match verification codes in notification bodies — bare
+- [x] **Detection:** match verification codes in notification bodies — bare
   4–8-digit codes and `G-123456`-style prefixed codes (confirm patterns against
   real sign-in texts). Lives in Rust beside the notification builders.
-- [ ] **Action:** a "Copy code" button on the native notification when a code
-  matches — macOS UNNotification action, Windows toast button, Linux
-  notify-rust action. Copy to clipboard without opening the window.
-- [ ] **Tests:** detector unit tests; a notification test asserting the action
+  Done as `verification_code` in `lib.rs`. Rule: tokens are letter/digit runs
+  (a single `- _ . , /` between two of them joins the run); a token is a code
+  if it is 4–8 ASCII digits, or 1–3 uppercase letters + `-` + 4–8 digits. The
+  copied text is the digits only (`G-123456` → `123456`); first code wins.
+  Still to do: confirm against real sign-in texts.
+- [x] **Action:** a "Copy code" button on the native notification when a code
+  matches — macOS NSUserNotification additional action (`gm-copycode:<code>`;
+  the app uses NSUserNotification, not UNNotification), Windows toast button
+  (`copycode`), Linux notify-rust action (`copycode`). Offered on message
+  notifications (conversation and plain), never on the takeover one.
+  Routed through `NotificationAction::CopyCode` in
+  `handle_notification_action`, which copies without showing the window.
+- [x] **Clipboard:** `arboard` 3 (default features off, text only), not
+  `tauri-plugin-clipboard-manager`: the plugin wraps arboard anyway and would
+  add plugin registration and a capability for a Rust-only call. One handle
+  is kept for the app's life (Linux serves the copied text from the app) and
+  dropped in `quit_app`. Adds 6 crates to Cargo.lock (arboard, clipboard-win,
+  error-code, gethostname, x11rb, x11rb-protocol). Linux uses X11 (XWayland
+  on Wayland); the `wayland-data-control` feature is not enabled.
+- [x] **Tests:** detector unit tests; a notification test asserting the action
   appears only when a code matches, and that the copied text is the code alone.
+  (Toast-XML test covers the button; the copied text is pinned by the detector
+  tests. The macOS/Linux builders and the clipboard write have no unit test.)
 - [ ] Device check: copy a real sign-in code from the toast on macOS + Windows.
 
 ### 3. Drag-and-drop attachments

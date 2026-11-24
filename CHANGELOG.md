@@ -5,6 +5,20 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Copy verification codes from the notification:** a message notification
+  whose text carries a code (a standalone 4–8 digit number, or a prefixed code
+  like `G-123456`) gets a "Copy code" button on macOS, Windows and Linux.
+  Pressing it copies the digits (`123456` for `G-123456`) to the clipboard
+  without opening the window.
+
+### Changed
+- CI runs the page-script tests on Node 24 (was 22), and the workflows use
+  `actions/checkout@v7` / `actions/setup-node@v7`, which drops the
+  "Node.js 20 deprecated" warning.
+
 ## [1.5.0] - 2026-11-23
 
 ### Added

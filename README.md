@@ -45,6 +45,10 @@ native-feeling, and complete as a desktop citizen.
   and **Mark as read**. Windows notifications are native toasts with the
   same fields (the WebView2 web-notification path was removed) and a toast
   with a reply box stays on screen until answered or dismissed
+- **Copy verification codes from the notification:** when a message
+  notification carries a code (`482913`, or `G-123456`, which copies
+  `123456`), it gets a **Copy code** button that puts the code on the
+  clipboard without opening the window (macOS, Windows, Linux)
 - Follows the system light/dark theme (or force light/dark in Settings) with a
   theme-matched cold-start background to prevent white flashes
 - Unread count surfaced via a native Windows taskbar overlay badge, macOS

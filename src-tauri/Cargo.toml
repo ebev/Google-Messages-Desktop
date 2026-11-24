@@ -18,6 +18,10 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# "Copy code" on notifications writes the clipboard from Rust: toast presses
+# carry no page activation, so the page cannot do it. Text only (no image
+# support, which would pull in the `image` crate).
+arboard = { version = "3", default-features = false }
 
 # macOS-only: native NSUserNotificationCenter click/action handling and
 # NSProcessInfo App Nap activity control for reliable background operation.

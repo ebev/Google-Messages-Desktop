@@ -115,6 +115,8 @@ const TOAST_ARG_SWITCH: &str = "switch";
 #[cfg(any(windows, test))]
 const TOAST_ARG_NO: &str = "no";
 #[cfg(any(windows, test))]
+const TOAST_ARG_COPY_CODE: &str = "copycode";
+#[cfg(any(windows, test))]
 const TOAST_REPLY_INPUT: &str = "reply";
 
 #[cfg(windows)]
@@ -270,7 +272,12 @@ enum NotificationAction {
     // Send this text to the conversation (typed reply or quick-action emoji).
     Reply(String),
     MarkRead,
+    // Put this verification code on the clipboard (see `verification_code`).
+    CopyCode(String),
 }
+
+// The button offered on a message notification whose body has a code.
+const COPY_CODE_LABEL: &str = "Copy code";
 
 // Decoded icon pixels: (RGBA bytes, width, height).
 type IconData = (Vec<u8>, u32, u32);
@@ -613,6 +620,7 @@ fn quit_app(app: &tauri::AppHandle) {
     // Toasts left behind could not do anything once the app is gone.
     #[cfg(windows)]
     windows_native::remove_all_notifications();
+    close_clipboard();
     app.exit(0);
 }
 
@@ -634,6 +642,7 @@ fn is_takeover_notification(id: &str) -> bool {
 // Carries out a reply or mark-as-read chosen on a notification by handing it
 // to the page script, which drives the Messages UI. The window stays where it
 // is; the script shows it only if the action cannot be completed.
+// "Copy code" is done here in Rust and never touches the window or the page.
 fn handle_notification_action(
     app: &tauri::AppHandle,
     id: &str,
@@ -643,6 +652,10 @@ fn handle_notification_action(
     let (name, text) = match action {
         NotificationAction::Reply(text) => ("reply", text),
         NotificationAction::MarkRead => ("read", String::new()),
+        NotificationAction::CopyCode(code) => {
+            copy_to_clipboard(&code);
+            return;
+        }
     };
     if let (Ok(id), Ok(title), Ok(text)) = (
         serde_json::to_string(id),
@@ -675,6 +688,33 @@ fn handle_notification_click(app: &tauri::AppHandle, id: &str, is_takeover: bool
                 "window.__gmNativeNotificationClicked && window.__gmNativeNotificationClicked({id});"
             ),
         );
+    }
+}
+
+// The clipboard handle, opened on first use and kept for the life of the app:
+// on Linux the copied text is served by the app that copied it, so it would
+// vanish if the handle were dropped straight after copying.
+static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
+
+fn copy_to_clipboard(text: &str) {
+    let Ok(mut guard) = CLIPBOARD.lock() else {
+        return;
+    };
+    if guard.is_none() {
+        *guard = arboard::Clipboard::new().ok();
+    }
+    if let Some(clipboard) = guard.as_mut() {
+        if let Err(_err) = clipboard.set_text(text) {
+            ipc_log!("copy to clipboard failed: {_err}");
+        }
+    }
+}
+
+// Drops the clipboard handle before exit, as arboard asks (on Linux this lets
+// a clipboard manager take over the last copied code).
+fn close_clipboard() {
+    if let Ok(mut guard) = CLIPBOARD.lock() {
+        guard.take();
     }
 }
 
@@ -759,6 +799,51 @@ fn start_background_listener(app: tauri::AppHandle) {
 // `clear_os_notifications`. macOS: `macos_native` (imported above). Linux:
 // D-Bus via notify-rust. Windows: native toasts in `windows_native`.
 
+// Finds a verification code in a message body, for the "Copy code" button.
+// The body is split into tokens: runs of letters and digits, where a single
+// `-`, `_`, `.`, `,` or `/` between two of them also joins the run (so
+// "555-1234", "1,234.56", "11/23/2026" and "user_4829" are single tokens). A
+// token is a code if it is
+//   - 4 to 8 ASCII digits ("482913"), or
+//   - 1 to 3 uppercase ASCII letters, a hyphen, then 4 to 8 ASCII digits
+//     ("G-123456").
+// The code returned is the digits only ("G-123456" gives "123456"): that is
+// what sign-in forms take. The first code in the body wins.
+fn verification_code(body: &str) -> Option<String> {
+    let chars: Vec<char> = body.chars().collect();
+    let joins = |i: usize| {
+        matches!(chars[i], '-' | '_' | '.' | ',' | '/')
+            && i > 0
+            && chars[i - 1].is_alphanumeric()
+            && chars.get(i + 1).is_some_and(|c| c.is_alphanumeric())
+    };
+    let is_digits = |s: &str| (4..=8).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit());
+    let mut i = 0;
+    while i < chars.len() {
+        if !chars[i].is_alphanumeric() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && (chars[i].is_alphanumeric() || joins(i)) {
+            i += 1;
+        }
+        let token: String = chars[start..i].iter().collect();
+        if is_digits(&token) {
+            return Some(token);
+        }
+        if let Some((prefix, digits)) = token.split_once('-') {
+            if (1..=3).contains(&prefix.len())
+                && prefix.bytes().all(|b| b.is_ascii_uppercase())
+                && is_digits(digits)
+            {
+                return Some(digits.to_string());
+            }
+        }
+    }
+    None
+}
+
 #[cfg(target_os = "linux")]
 fn linux_notif_map() -> &'static std::sync::Mutex<LinuxNotifMap> {
     LINUX_NOTIFS.get_or_init(|| std::sync::Mutex::new(LinuxNotifMap::new()))
@@ -813,6 +898,13 @@ fn send_os_notification(
             }
             NotificationKind::Plain => {}
         }
+        let code = match kind {
+            NotificationKind::Takeover => None,
+            _ => verification_code(&body),
+        };
+        if code.is_some() {
+            n.action("copycode", COPY_CODE_LABEL);
+        }
         let Ok(handle) = n.show() else {
             return;
         };
@@ -853,6 +945,16 @@ fn send_os_notification(
                     }
                     "read" => {
                         handle_notification_action(&app, &id, &title, NotificationAction::MarkRead)
+                    }
+                    "copycode" => {
+                        if let Some(code) = code.clone() {
+                            handle_notification_action(
+                                &app,
+                                &id,
+                                &title,
+                                NotificationAction::CopyCode(code),
+                            );
+                        }
                     }
                     _ => {}
                 }
@@ -973,9 +1075,18 @@ fn toast_xml(title: &str, body: &str, kind: &NotificationKind) -> String {
                 xml.push_str(&button(emoji, TOAST_ARG_QUICK));
             }
             xml.push_str(&button("Mark as read", TOAST_ARG_READ));
+            if verification_code(body).is_some() {
+                xml.push_str(&button(COPY_CODE_LABEL, TOAST_ARG_COPY_CODE));
+            }
             xml.push_str("</actions>");
         }
-        NotificationKind::Plain => {}
+        NotificationKind::Plain => {
+            if verification_code(body).is_some() {
+                xml.push_str("<actions>");
+                xml.push_str(&button(COPY_CODE_LABEL, TOAST_ARG_COPY_CODE));
+                xml.push_str("</actions>");
+            }
+        }
     }
     xml.push_str("</toast>");
     xml
@@ -2300,6 +2411,8 @@ mod macos_native {
     // needs no lookup of what was configured when the notification was sent.
     const QUICK_ACTION_PREFIX: &str = "gm-quick:";
     const MARK_READ_ACTION_ID: &str = "gm-read";
+    // "Copy code" carries the code after the prefix, like the quick action.
+    const COPY_CODE_PREFIX: &str = "gm-copycode:";
 
     struct GmNotificationDelegateIvars {
         app: tauri::AppHandle,
@@ -2383,6 +2496,8 @@ mod macos_native {
                 Some(NotificationAction::Reply(emoji.to_string()))
             } else if action_id == MARK_READ_ACTION_ID {
                 Some(NotificationAction::MarkRead)
+            } else if let Some(code) = action_id.strip_prefix(COPY_CODE_PREFIX) {
+                Some(NotificationAction::CopyCode(code.to_string()))
             } else {
                 None
             }
@@ -2492,9 +2607,19 @@ mod macos_native {
                             ));
                         }
                         actions.push(notification_action(MARK_READ_ACTION_ID, "Mark as Read"));
+                        if let Some(code) = crate::verification_code(&body) {
+                            actions.push(copy_code_action(&code));
+                        }
                         notif.setAdditionalActions(Some(&NSArray::from_retained_slice(&actions)));
                     }
-                    NotificationKind::Plain => {}
+                    NotificationKind::Plain => {
+                        if let Some(code) = crate::verification_code(&body) {
+                            let actions = [copy_code_action(&code)];
+                            notif.setAdditionalActions(Some(&NSArray::from_retained_slice(
+                                &actions,
+                            )));
+                        }
+                    }
                 }
                 center.deliverNotification(&notif);
                 DELIVERED_NOTIFS.with(|slot| {
@@ -2502,6 +2627,11 @@ mod macos_native {
                 });
             }
         });
+    }
+
+    #[allow(deprecated)]
+    fn copy_code_action(code: &str) -> Retained<NSUserNotificationAction> {
+        notification_action(&format!("{COPY_CODE_PREFIX}{code}"), crate::COPY_CODE_LABEL)
     }
 
     #[allow(deprecated)]
@@ -2714,6 +2844,12 @@ mod windows_native {
 
         let handler_app = app.clone();
         let handler_id = id.clone();
+        // The code the Copy code button copies; `toast_xml` shows the button
+        // exactly when this is found.
+        let code = match kind {
+            NotificationKind::Takeover => None,
+            _ => crate::verification_code(body),
+        };
         toast.Activated(&TypedEventHandler::<ToastNotification, IInspectable>::new(
             move |_, args| {
                 let activated = args
@@ -2733,7 +2869,15 @@ mod windows_native {
                     .and_then(|value| value.GetString().ok())
                     .map(|text| text.to_string())
                     .unwrap_or_default();
-                on_activated(&handler_app, &handler_id, &title, &kind, &argument, reply);
+                on_activated(
+                    &handler_app,
+                    &handler_id,
+                    &title,
+                    &kind,
+                    code.as_deref(),
+                    &argument,
+                    reply,
+                );
                 Ok(())
             },
         ))?;
@@ -2752,6 +2896,7 @@ mod windows_native {
         id: &str,
         title: &str,
         kind: &NotificationKind,
+        code: Option<&str>,
         argument: &str,
         reply: String,
     ) {
@@ -2771,6 +2916,9 @@ mod windows_native {
                 quick_action.map(NotificationAction::Reply)
             }
             crate::TOAST_ARG_READ if is_conversation => Some(NotificationAction::MarkRead),
+            crate::TOAST_ARG_COPY_CODE if code.is_some() => {
+                code.map(|code| NotificationAction::CopyCode(code.to_string()))
+            }
             _ => None,
         };
         match action {
@@ -3108,6 +3256,97 @@ mod tests {
             &NotificationKind::Conversation { quick_action: None },
         );
         assert!(!without_emoji.contains("arguments=\"quick\""));
+        // "hi" carries no code, so there is no Copy code button.
+        assert!(!xml.contains("arguments=\"copycode\""));
+    }
+
+    #[test]
+    fn bare_digit_codes_are_detected() {
+        assert_eq!(
+            verification_code("Your code is 482913"),
+            Some("482913".to_string())
+        );
+        assert_eq!(
+            verification_code("482913 is your verification code."),
+            Some("482913".to_string())
+        );
+        assert_eq!(verification_code("PIN: 1234"), Some("1234".to_string()));
+        assert_eq!(
+            verification_code("Code (12345678), valid 10 minutes"),
+            Some("12345678".to_string())
+        );
+        // The first code in the body wins.
+        assert_eq!(
+            verification_code("Use 2468 or 1357"),
+            Some("2468".to_string())
+        );
+    }
+
+    #[test]
+    fn prefixed_codes_copy_only_their_digits() {
+        assert_eq!(
+            verification_code("G-123456 is your Google verification code."),
+            Some("123456".to_string())
+        );
+        assert_eq!(
+            verification_code("Your code: AB-9876"),
+            Some("9876".to_string())
+        );
+    }
+
+    #[test]
+    fn digits_inside_longer_tokens_are_not_codes() {
+        for body in [
+            "",
+            "See you at 5",
+            "Call 123",
+            "Ref 123456789",
+            "Order ABC123456 shipped",
+            "Tracking 123456XYZ",
+            "user_482913 joined",
+            "Call 555-1234 now",
+            "Meet at 12:30",
+            "Paid $1,234.56",
+            "Due 11/23/2026",
+            "Version 1.2345",
+            "page-1234",
+            "ABCD-123456",
+            "G-123",
+            "G-123456789",
+            "код123456",
+            "G-",
+        ] {
+            assert_eq!(verification_code(body), None, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn toasts_offer_copy_code_only_when_the_body_has_a_code() {
+        let conversation = NotificationKind::Conversation {
+            quick_action: Some("👍".to_string()),
+        };
+        let with_code = toast_xml("Google", "G-482913 is your code", &conversation);
+        assert!(with_code.contains("content=\"Copy code\" arguments=\"copycode\""));
+        // The existing buttons stay, and Copy code comes after them.
+        assert!(with_code.contains("content=\"👍\" arguments=\"quick\""));
+        assert!(with_code.contains("content=\"Mark as read\" arguments=\"read\""));
+        assert!(
+            with_code.find("arguments=\"read\"").unwrap()
+                < with_code.find("arguments=\"copycode\"").unwrap()
+        );
+        // The copied text is the code alone, so it is not put in the XML.
+        assert!(!with_code.contains("arguments=\"copycode:"));
+
+        let plain = toast_xml("22000", "Your code is 1234", &NotificationKind::Plain);
+        assert!(plain.contains("<actions><action content=\"Copy code\" arguments=\"copycode\""));
+
+        assert!(!toast_xml("Bob", "see you at 5", &conversation).contains("copycode"));
+        assert!(!toast_xml("Bob", "Call 555-1234", &NotificationKind::Plain).contains("<actions>"));
+        // The takeover notification is not a message.
+        assert!(
+            !toast_xml("Open elsewhere", "Code 1234", &NotificationKind::Takeover)
+                .contains("copycode")
+        );
     }
 
     #[test]
