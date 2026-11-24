@@ -9,7 +9,7 @@ files dropped onto the window.
 Status: scoped 2026-11-24; not started. Each item ends with its own device check.
 
 ### 1. Node upgrade (CI, then local)
-- [ ] **Bump the test runner:** `actions/setup-node@v4` + `node-version: 22` →
+- [x] **Bump the test runner:** `actions/setup-node@v4` + `node-version: 22` →
   `@v7` + `24` in `ci.yml`. 24 is the mature LTS; 26 went LTS 2026-10-28 and is
   a month old — revisit after 26.1. Also `actions/checkout@v4` → `@v7` on all
   workflows (that v4 pin is what emits the "Node.js 20 deprecated" warning —
@@ -17,7 +17,8 @@ Status: scoped 2026-11-24; not started. Each item ends with its own device check
 - [ ] **Prove the suites on 24:** page-script tests + packaging legs green in CI.
 - [ ] **Local runtime (22.23.4 on this box) is a host decision** — not changed
   by this item; bump separately if wanted (dnf/nodejs-24).
-- [ ] Update README "Prerequisites" if it names a Node version.
+- [x] Update README "Prerequisites" if it names a Node version. (It only
+  links Node.js — no version named, left unchanged.)
 
 ### 2. Auto code copy (copy-on-demand)
 - [ ] **Detection:** match verification codes in notification bodies — bare
