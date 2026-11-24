@@ -1,5 +1,49 @@
 # TODO
 
+## v1.6 — Node upgrade, copy-on-demand codes, drag-and-drop attachments
+
+Goal: modernise the toolchain (the CI pins Node 22, two LTS lines behind 24/26),
+match Texty's copy-on-demand verification codes from notifications, and accept
+files dropped onto the window.
+
+Status: scoped 2026-11-24; not started. Each item ends with its own device check.
+
+### 1. Node upgrade (CI, then local)
+- [ ] **Bump the test runner:** `actions/setup-node@v4` + `node-version: 22` →
+  `@v7` + `24` in `ci.yml`. 24 is the mature LTS; 26 went LTS 2026-10-28 and is
+  a month old — revisit after 26.1. Also `actions/checkout@v4` → `@v7` on all
+  workflows (that v4 pin is what emits the "Node.js 20 deprecated" warning —
+  it is the action's own runtime, not ours).
+- [ ] **Prove the suites on 24:** page-script tests + packaging legs green in CI.
+- [ ] **Local runtime (22.23.4 on this box) is a host decision** — not changed
+  by this item; bump separately if wanted (dnf/nodejs-24).
+- [ ] Update README "Prerequisites" if it names a Node version.
+
+### 2. Auto code copy (copy-on-demand)
+- [ ] **Detection:** match verification codes in notification bodies — bare
+  4–8-digit codes and `G-123456`-style prefixed codes (confirm patterns against
+  real sign-in texts). Lives in Rust beside the notification builders.
+- [ ] **Action:** a "Copy code" button on the native notification when a code
+  matches — macOS UNNotification action, Windows toast button, Linux
+  notify-rust action. Copy to clipboard without opening the window.
+- [ ] **Tests:** detector unit tests; a notification test asserting the action
+  appears only when a code matches, and that the copied text is the code alone.
+- [ ] Device check: copy a real sign-in code from the toast on macOS + Windows.
+
+### 3. Drag-and-drop attachments
+- **Mechanism gate — probe first:** does messages.google.com attach a file
+  dropped onto the composer in a plain browser? If YES → set
+  `dragDropEnabled: false` on the main window so the webview receives HTML5
+  drag events (one config line, the page does the work). If NO → keep it
+  enabled and handle `DragDropEvent` in `lib.rs`: read the paths, then feed
+  the page's attachment input from `init_script.js` (DataTransfer + `change`
+  dispatch). Do not build the Rust path until the probe says it is needed.
+- [ ] **Multi-file drops** accepted; document the chosen mechanism here.
+- [ ] Device check: Finder drop → attaches (macOS), Explorer drop → attaches
+  (Windows), and a drop while the window is in the tray behaves sanely.
+
+---
+
 ## v1.5 — Native Windows Toasts & Quick Reply (Windows side) — IMPLEMENTED, NOT YET RUN ON WINDOWS
 
 Goal: replace WebView2's web `Notification` on Windows with native toast
