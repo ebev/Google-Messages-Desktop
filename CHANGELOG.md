@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "copy" cursor again (the "+" badge on macOS), which 1.6.0 lost when Tauri's
   drag-drop handler was turned off. Drops keep attaching files as in 1.6.0.
 
+### Changed
+- **macOS: "Copy code" is the notification's visible button.** On a
+  code-bearing message notification without a reply field, the copy button
+  is now the notification's action button instead of an item in the
+  "Show ▾" menu; clicking the banner body still opens the chat. Notifications
+  with a reply field keep Copy code in the menu, because macOS puts the
+  Reply button in the action button's place.
+
 ## [1.6.0] - 2026-11-23
 
 ### Added

@@ -268,6 +268,7 @@ struct PopoverAnchor {
 
 // Something the user did from a conversation notification without opening
 // the window.
+#[derive(Debug, PartialEq)]
 enum NotificationAction {
     // Send this text to the conversation (typed reply or quick-action emoji).
     Reply(String),
@@ -809,6 +810,54 @@ fn start_background_listener(app: tauri::AppHandle) {
 //     ("G-123456").
 // The code returned is the digits only ("G-123456" gives "123456"): that is
 // what sign-in forms take. The first code in the body wins.
+// Where "Copy code" goes on a macOS notification.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, PartialEq)]
+enum CopyCodePlacement {
+    // The notification's one visible action button.
+    Primary(String),
+    // The supplemental-action menu next to the action button.
+    Menu(String),
+}
+
+// Decides where "Copy code" goes on a macOS notification. NSUserNotification
+// shows one action button, and a reply field takes that button's place, so
+// the copy button can be the visible button only on notifications without a
+// reply field; with one, it stays in the menu. The takeover notification's
+// button is Switch Here and never changes. Used both when building the
+// notification and when it is pressed, so the two always agree.
+#[cfg(any(target_os = "macos", test))]
+fn mac_copy_code_placement(
+    is_takeover: bool,
+    has_reply_button: bool,
+    body: &str,
+) -> Option<CopyCodePlacement> {
+    if is_takeover {
+        return None;
+    }
+    let code = verification_code(body)?;
+    Some(if has_reply_button {
+        CopyCodePlacement::Menu(code)
+    } else {
+        CopyCodePlacement::Primary(code)
+    })
+}
+
+// What pressing a macOS notification's action button does: copy the code
+// when the button is "Copy code", otherwise nothing here (the caller then
+// opens the window, as before).
+#[cfg(any(target_os = "macos", test))]
+fn mac_action_button_action(
+    is_takeover: bool,
+    has_reply_button: bool,
+    body: &str,
+) -> Option<NotificationAction> {
+    match mac_copy_code_placement(is_takeover, has_reply_button, body)? {
+        CopyCodePlacement::Primary(code) => Some(NotificationAction::CopyCode(code)),
+        CopyCodePlacement::Menu(_) => None,
+    }
+}
+
 fn verification_code(body: &str) -> Option<String> {
     let chars: Vec<char> = body.chars().collect();
     let joins = |i: usize| {
@@ -2461,12 +2510,37 @@ mod macos_native {
                     return;
                 }
 
+                let is_takeover = crate::is_takeover_notification(&id);
+                // The action button may be "Copy code". The code is found
+                // again in the notification's own text rather than kept in
+                // DELIVERED_NOTIFS: the delivered object carries its body
+                // and reply-field flag, and the same helper that placed the
+                // button decides, so the two cannot disagree.
+                if activation == NSUserNotificationActivationType::ActionButtonClicked {
+                    let body = notification
+                        .informativeText()
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    if let Some(action) = crate::mac_action_button_action(
+                        is_takeover,
+                        notification.hasReplyButton(),
+                        &body,
+                    ) {
+                        let title = notification
+                            .title()
+                            .map(|s| s.to_string())
+                            .unwrap_or_default();
+                        crate::handle_notification_action(app, &id, &title, action);
+                        return;
+                    }
+                }
+
                 let clicked = activation == NSUserNotificationActivationType::ContentsClicked
                     || activation == NSUserNotificationActivationType::ActionButtonClicked;
                 if !clicked {
                     return;
                 }
-                crate::handle_notification_click(app, &id, crate::is_takeover_notification(&id));
+                crate::handle_notification_click(app, &id, is_takeover);
             }
 
             #[unsafe(method(userNotificationCenter:shouldPresentNotification:))]
@@ -2611,17 +2685,22 @@ mod macos_native {
                             ));
                         }
                         actions.push(notification_action(MARK_READ_ACTION_ID, "Mark as Read"));
-                        if let Some(code) = crate::verification_code(&body) {
+                        if let Some(crate::CopyCodePlacement::Menu(code)) =
+                            crate::mac_copy_code_placement(false, true, &body)
+                        {
                             actions.push(copy_code_action(&code));
                         }
                         notif.setAdditionalActions(Some(&NSArray::from_retained_slice(&actions)));
                     }
                     NotificationKind::Plain => {
-                        if let Some(code) = crate::verification_code(&body) {
-                            let actions = [copy_code_action(&code)];
-                            notif.setAdditionalActions(Some(&NSArray::from_retained_slice(
-                                &actions,
-                            )));
+                        // The action button itself becomes "Copy code", with
+                        // no menu. Pressing it is routed by
+                        // `mac_action_button_action` in `did_activate`.
+                        if let Some(crate::CopyCodePlacement::Primary(_)) =
+                            crate::mac_copy_code_placement(false, false, &body)
+                        {
+                            notif.setHasActionButton(true);
+                            notif.setActionButtonTitle(&NSString::from_str(crate::COPY_CODE_LABEL));
                         }
                     }
                 }
@@ -3351,6 +3430,40 @@ mod tests {
             !toast_xml("Open elsewhere", "Code 1234", &NotificationKind::Takeover)
                 .contains("copycode")
         );
+    }
+
+    #[test]
+    fn mac_copy_code_is_the_primary_button_when_the_slot_is_free() {
+        assert_eq!(
+            mac_copy_code_placement(false, false, "G-482913 is your code"),
+            Some(CopyCodePlacement::Primary("482913".to_string()))
+        );
+        // A reply field takes the action button's place, so the copy button
+        // stays in the menu rather than replacing Reply.
+        assert_eq!(
+            mac_copy_code_placement(false, true, "Your code is 1234"),
+            Some(CopyCodePlacement::Menu("1234".to_string()))
+        );
+    }
+
+    #[test]
+    fn mac_notifications_without_a_code_get_no_copy_button() {
+        assert_eq!(mac_copy_code_placement(false, false, "see you at 5"), None);
+        assert_eq!(mac_copy_code_placement(false, true, "Call 555-1234"), None);
+        // The takeover notification keeps Switch Here, whatever its text.
+        assert_eq!(mac_copy_code_placement(true, false, "Code 1234"), None);
+    }
+
+    #[test]
+    fn mac_action_button_copies_only_when_it_is_the_copy_button() {
+        assert_eq!(
+            mac_action_button_action(false, false, "Your code is 482913"),
+            Some(NotificationAction::CopyCode("482913".to_string()))
+        );
+        // Otherwise the action button opens the window, as before.
+        assert_eq!(mac_action_button_action(false, false, "hello"), None);
+        assert_eq!(mac_action_button_action(true, false, "Code 1234"), None);
+        assert_eq!(mac_action_button_action(false, true, "Code 1234"), None);
     }
 
     #[test]

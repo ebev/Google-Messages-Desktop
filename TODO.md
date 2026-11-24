@@ -37,6 +37,18 @@ Node 24. Each item ends with its own device check.
   notifications (conversation and plain), never on the takeover one.
   Routed through `NotificationAction::CopyCode` in
   `handle_notification_action`, which copies without showing the window.
+- [ ] **macOS visible button (next version, owner decision 2026-11-24):** on
+  code-bearing notifications without a reply field, "Copy code" is the
+  NSUserNotification action button (`setActionButtonTitle`), with no
+  supplemental copy action; `ActionButtonClicked` copies,
+  `ContentsClicked` still opens the chat. Decided by
+  `mac_copy_code_placement` / `mac_action_button_action`, which re-read the
+  code from the delivered notification's own text (no extra state). On
+  notifications WITH a reply field the Reply button occupies that slot, so
+  Copy code stays in the menu there — a conflict with "single visible
+  button" for repliable senders, left for the owner to decide. The durable
+  multi-button fix is migrating to UserNotifications (UNNotificationCategory
+  actions). Device check pending.
 - [x] **Clipboard:** `arboard` 3 (default features off, text only), not
   `tauri-plugin-clipboard-manager`: the plugin wraps arboard anyway and would
   add plugin registration and a capability for a Rust-only call. One handle
