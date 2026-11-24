@@ -123,11 +123,11 @@ jobs:
               cat "$resp"; exit 1
               ;;
           esac
-          id=$(grep -o '"id":[0-9]*' "$resp" | head -n 1 | cut -d: -f2)
+          id=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['id'])" "$resp")
           echo "Using snapshots release $id for $snaptag"
           for f in "$@"; do
             name=$(basename "$f")
-            assets_json="$(curl -sS -H "$auth" "$API/releases/$id/assets")"
+            assets_json="$(curl -sS -H "$auth" "$API/releases/$id/assets?per_page=100")"
             del_ids=$(printf '%s' "$assets_json" | python3 -c "import json,sys; asset_name=sys.argv[1]; [print(a['id']) for a in json.load(sys.stdin) if a.get('name')==asset_name]" "$name")
             for aid in $del_ids; do
               dcode=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H "$auth" "$API/releases/assets/$aid")

@@ -166,8 +166,9 @@ jobs:
               exit 1
               ;;
           esac
-          # The release id is the first "id" field in the response object.
-          id=$(grep -o '"id":[0-9]*' "$resp" | head -n 1 | cut -d: -f2)
+          # The release id — GitHub pretty-prints ("id": 123), so parse JSON
+          # rather than grepping compact Gitea-style output.
+          id=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['id'])" "$resp")
           if [ -z "$id" ]; then
             echo "Could not read release id from response:"
             cat "$resp"
