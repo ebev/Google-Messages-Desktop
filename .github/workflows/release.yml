@@ -178,6 +178,8 @@ jobs:
 
           for f in "${artifacts[@]}"; do
             name=$(basename "$f")
+            # GitHub replaces spaces with dots in release asset names.
+            name="${name// /.}"
             # Re-upload safety: delete any existing asset with the same name,
             # so a re-run replaces packages instead of failing on a duplicate.
             del_ids=$(curl -sS -H "$auth" "$API/releases/$id/assets" | python3 -c "import json,sys; asset_name=sys.argv[1]; print('\n'.join(str(a['id']) for a in json.load(sys.stdin) if a.get('name')==asset_name))" "$name")
@@ -206,4 +208,4 @@ jobs:
             echo "Asset listing failed (HTTP $code):"
             cat "$resp"; exit 1
           fi
-          python3 -c "import json,sys; a=json.load(open(sys.argv[1])); e=sorted(f.rsplit('/',1)[-1] for f in sys.argv[3:]); h=sorted(x['name'] for x in a); m=[n for n in e if n not in h]; print(('FAILED' if m else 'PASSED'), sys.argv[2], 'expected', e, 'missing', m); sys.exit(1 if m else 0)" "$resp" "$OS" "${artifacts[@]}"
+          python3 -c "import json,sys; a=json.load(open(sys.argv[1])); e=sorted(f.rsplit('/',1)[-1].replace(' ', '.') for f in sys.argv[3:]); h=sorted(x['name'] for x in a); m=[n for n in e if n not in h]; print(('FAILED' if m else 'PASSED'), sys.argv[2], 'expected', e, 'missing', m); sys.exit(1 if m else 0)" "$resp" "$OS" "${artifacts[@]}"
