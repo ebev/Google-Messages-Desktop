@@ -64,6 +64,21 @@ Node 24. Each item ends with its own device check.
   settings and popover windows unchanged.
 - [ ] **Multi-file drops** accepted (the page handles them; device check
   below). Mechanism documented above.
+- [ ] **Drag cursor feedback (next version):** 1.6.0 device test on macOS:
+  drops attach, but the "+" cursor badge was gone. In 1.5 it came from
+  Tauri's handler, which forces `NSDragOperation::Copy` only because it
+  consumes the drop. Tauri 2.11.2 offers no non-consuming handler (its wry
+  handler always returns `true`; `on_window_event`/`on_webview_event` only
+  observe, and only while that handler is on), so the fix is page-side: a
+  capture-phase `dragover` listener in `init_script.js`
+  (`showCopyCursorForFiles`) sets `dataTransfer.dropEffect = 'copy'` for
+  drags whose types include `Files`, with no `preventDefault` or
+  `stopPropagation`. WebKit reports that drop effect back to wry, which
+  draws the cursor. Device check: "+" shows while dragging a file over the
+  window (macOS; copy cursor on Windows), the drop attaches, dragging away
+  clears it. **Fallback** if the badge still doesn't show (e.g. Messages
+  sets its own `dropEffect` after ours): a page-side "Drop to attach"
+  overlay with `pointer-events: none`, driven by dragenter/dragleave/drop.
 - [ ] Device check: Finder drop → attaches (macOS), Explorer drop → attaches
   (Windows), and a drop while the window is in the tray behaves sanely.
 

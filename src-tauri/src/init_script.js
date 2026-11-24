@@ -526,6 +526,20 @@
         }
     }
 
+    // --- Drag cursor feedback for file drops ---
+    // The app turns off Tauri's drag-drop handler so dropped files reach the
+    // page. Without it, WebKit reports the page's drop effect back to wry,
+    // and that decides the drag cursor (the "+" copy badge on macOS). Asking
+    // for "copy" on file drags brings the badge back. No preventDefault and
+    // no stopPropagation: the page's own dragover handling and the native
+    // drop must run exactly as before.
+    function showCopyCursorForFiles(e) {
+        const dt = e.dataTransfer;
+        if (dt && dt.types && Array.prototype.indexOf.call(dt.types, 'Files') !== -1) {
+            dt.dropEffect = 'copy';
+        }
+    }
+
     // --- Route external & target="_blank" / window.open links ---
     // Handle link navigations so the main window stays on Google Messages:
     //   - messages.google.com (Messages / Calls / Voicemail) -> navigate in the
@@ -1740,6 +1754,7 @@
     // Event listeners. Link clicks and keys use the capture phase so we beat
     // the app's own handlers.
     document.addEventListener('dragstart', preventGhostDrag, true);
+    document.addEventListener('dragover', showCopyCursorForFiles, true);
     document.addEventListener('click', handleLinkClick, true);
     document.addEventListener('auxclick', handleLinkClick, true);
     document.addEventListener('keydown', handleKeydown, true);

@@ -877,3 +877,45 @@ test('timestamp text kept for screen readers, or a long form beside its short on
     assert.equal(time('Bob'), 'Fri');
     assert.equal(time('Carol'), 'Sat');
 });
+
+
+// --- Drag cursor feedback ---
+
+// Dispatches a dragover on the page body carrying a stand-in dataTransfer
+// (jsdom has no DataTransfer or DragEvent). Records what the page's own
+// bubble-phase listener saw, so the test can check the event reached it.
+function dragOver(window, types) {
+    const dataTransfer = { types, dropEffect: 'none' };
+    const event = new window.Event('dragover', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', { value: dataTransfer });
+    let pageSaw = null;
+    const pageListener = (e) => { pageSaw = { dropEffect: e.dataTransfer.dropEffect }; };
+    window.document.body.addEventListener('dragover', pageListener);
+    window.document.body.dispatchEvent(event);
+    window.document.body.removeEventListener('dragover', pageListener);
+    return { event, dataTransfer, pageSaw };
+}
+
+test('a file drag over the page asks for the copy cursor', (t) => {
+    const page = loadPage();
+    t.after(() => page.close());
+    const { dataTransfer, pageSaw } = dragOver(page.window, ['Files']);
+    assert.equal(dataTransfer.dropEffect, 'copy');
+    // Set in the capture phase, so the page's own handler already sees it.
+    assert.deepEqual(pageSaw, { dropEffect: 'copy' });
+});
+
+test('a text drag over the page is left alone', (t) => {
+    const page = loadPage();
+    t.after(() => page.close());
+    assert.equal(dragOver(page.window, ['text/plain']).dataTransfer.dropEffect, 'none');
+});
+
+test('the drag cursor listener never cancels or stops the drag', (t) => {
+    const page = loadPage();
+    t.after(() => page.close());
+    const { event, pageSaw } = dragOver(page.window, ['Files', 'text/uri-list']);
+    assert.equal(event.defaultPrevented, false);
+    // Reached the page's own listener, so propagation was not stopped.
+    assert.notEqual(pageSaw, null);
+});
