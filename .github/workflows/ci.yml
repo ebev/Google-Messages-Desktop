@@ -21,16 +21,16 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  # ubuntu and macOS test on their respective hosts on both GitHub and the
+  # Gitea backup mirror; the two windows jobs below split by host because the
+  # hosts only share the ubuntu/macos labels.
   rust:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # windows-cross-latest is a Linux container (no WebKitGTK) that
-        # cross-compiles for MSVC via cargo-xwin; it is not a Windows host, so
-        # runner.os is Linux there and steps must key on matrix.os instead.
-        os: [macos-latest, windows-cross-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest]
     defaults:
       run:
         working-directory: src-tauri
@@ -56,17 +56,52 @@ jobs:
       # Each OS compiles its own platform-specific code (notifications,
       # permissions, tray), so this is also the cross-platform build check.
       - name: Test
-        if: matrix.os != 'windows-cross-latest'
         run: cargo test
       # Advisory: lints are reported in the log but do not fail the build.
       - name: Clippy
-        if: matrix.os != 'windows-cross-latest'
         run: cargo clippy --all-targets
-      # MSVC-target test binaries cannot run without Windows, so the cross leg
-      # only builds and lints.
+
+  # GitHub hosts a real Windows runner, so the Windows code finally gets
+  # executed, not just cross-compiled.
+  windows:
+    name: Rust (windows)
+    if: github.server_url == 'https://github.com'
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Test
+        run: cargo test
+      # Advisory: lints are reported in the log but do not fail the build.
+      - name: Clippy
+        run: cargo clippy --all-targets
+
+  # The Gitea backup mirror keeps its cargo-xwin cross-compile flavor: that
+  # runner is a Linux container with the MSVC cross toolchain, so test
+  # binaries cannot run — build and lint only. See release.yml's header for
+  # the full story on the per-host split.
+  windows-cross:
+    name: Rust (windows cross)
+    if: github.server_url != 'https://github.com'
+    runs-on: windows-cross-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
       - name: Build (Windows cross)
-        if: matrix.os == 'windows-cross-latest'
         run: cargo xwin build --target x86_64-pc-windows-msvc
       - name: Clippy (Windows cross, advisory)
-        if: matrix.os == 'windows-cross-latest'
         run: cargo xwin clippy --target x86_64-pc-windows-msvc

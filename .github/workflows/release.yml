@@ -1,16 +1,30 @@
 name: release-packages
 
+# Version tag -> per-OS packages uploaded straight to the GitHub release.
+#
+# GitHub primary: the repo's primary CI lives on GitHub; Gitea receives this
+# repo as a backup mirror and has no native Windows runner, so every job is
+# gated on github.server_url and a Gitea push skips all jobs cleanly instead
+# of queueing on a label its fleet can't serve. To restore Gitea packaging,
+# restore the cross-compile flavor (runs-on windows-cross-latest,
+# --runner cargo-xwin, the Gitea asset API) from this file's git history
+# and drop the gates.
+
 on:
   push:
     tags: ['v*']
 
+permissions:
+  contents: write
+
 concurrency:
-  group: release-${{ gitea.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   packages:
-    name: Packages (${{ matrix.os }})
+    name: Packages (${{ matrix.os }}${{ matrix.tarch && format(' {0}', matrix.tarch) || '' }})
+    if: github.server_url == 'https://github.com'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -18,10 +32,10 @@ jobs:
         include:
           - os: ubuntu-latest
             targets: deb,rpm
-          - os: windows-cross-latest
+          - os: windows-latest
             targets: nsis
             tarch: x86_64-pc-windows-msvc
-          - os: windows-cross-latest
+          - os: windows-latest
             targets: nsis
             tarch: aarch64-pc-windows-msvc
           - os: macos-latest
@@ -33,7 +47,7 @@ jobs:
       - name: Check tag matches Cargo.toml version
         shell: bash
         env:
-          REF: ${{ gitea.ref }}
+          REF: ${{ github.ref }}
         run: |
           crate_version=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)
           tag="${REF#refs/tags/}"
@@ -54,43 +68,44 @@ jobs:
             libwebkit2gtk-4.1-dev build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
       - uses: Swatinem/rust-cache@v2
-        if: matrix.os == 'ubuntu-latest'
         with:
           workspaces: src-tauri
-      # All legs run this: on mac it verifies rustup fast AND puts cargo on the
-      # launchd PATH (which lacks ~/.cargo/bin — without it tauri can't run
-      # `cargo metadata` and the leg dies in a second).
+      # All legs run this: on mac it puts cargo on the PATH; on Windows the
+      # matrix target is the MSVC arch the packaging leg builds for.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.tarch }}
       - name: Build (Linux deb/rpm)
         if: matrix.os == 'ubuntu-latest'
         run: npm run tauri build -- -b deb,rpm
-      # windows-cross-latest is a Linux container: cargo-xwin links against the
-      # MSVC SDK and makensis builds the installer, so no Windows host is needed.
-      # Both x64 and arm64 (Windows-on-ARM) targets cross-compile here.
-      - name: Build (Windows cross, nsis)
-        if: matrix.os == 'windows-cross-latest'
-        run: npm run tauri build -- -b nsis --runner cargo-xwin --target ${{ matrix.tarch }}
+      # Native Windows runners; the arm64 leg cross-compiles the ARM64 target
+      # on the x64 host, and the NSIS stub installs it under WoA emulation.
+      - name: Build (Windows nsis)
+        if: matrix.os == 'windows-latest'
+        run: npm run tauri build -- -b nsis --target ${{ matrix.tarch }}
       # Ad-hoc signed (signingIdentity "-" in tauri.conf.json), not notarized.
       - name: Build (macOS dmg)
         if: matrix.os == 'macos-latest'
         run: npm run tauri build -- -b dmg
+
       # Every leg uploads to the same release. The first leg to arrive creates
-      # it (GET by tag, POST on 404); a leg that loses that race gets 409 and
+      # it (GET by tag, POST on 404); a leg that loses that race gets 422 and
       # re-reads the release the other leg created.
       - name: Verify and upload to release
         shell: bash
         env:
           OS: ${{ matrix.os }}
           TARCH: ${{ matrix.tarch }}
-          REF: ${{ gitea.ref }}
+          REF: ${{ github.ref }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          API: https://gitea.eabev.com/api/v1/repos/eric/Google-Messages
+          API: https://api.github.com/repos/${{ github.repository }}
+          UPLOAD: https://uploads.github.com/repos/${{ github.repository }}
         run: |
           set -euo pipefail
           tag="${REF#refs/tags/}"
           bundle=src-tauri/target/release/bundle
-          xbundle=src-tauri/target/x86_64-pc-windows-msvc/release
-          if [ -n "$TARCH" ]; then xbundle="src-tauri/target/$TARCH/release"; fi
+          archbundle="src-tauri/target/$TARCH/release"
+          if [ -z "$TARCH" ]; then archbundle="src-tauri/target/release"; fi
 
           artifacts=()
           need() {
@@ -108,11 +123,11 @@ jobs:
               need deb "$bundle/deb" '*.deb'
               need rpm "$bundle/rpm" '*.rpm'
               ;;
-            windows-cross-latest)
-              # Installers only — portable exes are uploaded nowhere: rustc
-              # names them the same for both arches, which collides on the
-              # release. Ship one NSIS installer per arch instead.
-              need "nsis installer" "$xbundle/bundle/nsis" '*-setup.exe'
+            windows-latest)
+              # Installers only — no portable exes: rustc names them the same
+              # for both arches, which collides on the release. Ship one NSIS
+              # installer per arch instead.
+              need "nsis installer" "$archbundle/bundle/nsis" '*-setup.exe'
               ;;
             macos-latest)
               need dmg "$bundle/dmg" '*.dmg'
@@ -124,7 +139,7 @@ jobs:
           esac
           printf 'Found: %s\n' "${artifacts[@]}"
 
-          auth="Authorization: token $TOKEN"
+          auth="Authorization: Bearer $TOKEN"
           resp=$(mktemp)
 
           get_release() {
@@ -137,7 +152,8 @@ jobs:
               -H "$auth" -H 'Content-Type: application/json' \
               -d "{\"tag_name\":\"$tag\",\"name\":\"$tag\",\"body\":\"\"}" \
               "$API/releases")
-            if [ "$code" = "409" ]; then
+            # GitHub answers 422 (not 409) when the tag already has a release.
+            if [ "$code" = "422" ] || [ "$code" = "409" ]; then
               echo "Release for $tag was created concurrently, re-reading it"
               code=$(get_release)
             fi
@@ -162,18 +178,19 @@ jobs:
           for f in "${artifacts[@]}"; do
             name=$(basename "$f")
             # Re-upload safety: delete any existing asset with the same name,
-            # so a re-run or re-tag replaces packages instead of stacking
-            # duplicates (the query param alone does not dedupe).
-            del_ids=$(curl -sS -H "$auth" "$API/releases/$id/assets" | python3 -c "import json,sys; asset_name=sys.argv[1]; print('\\n'.join(str(a['id']) for a in json.load(sys.stdin) if a.get('name')==asset_name))" "$name")
+            # so a re-run replaces packages instead of failing on a duplicate.
+            del_ids=$(curl -sS -H "$auth" "$API/releases/$id/assets" | python3 -c "import json,sys; asset_name=sys.argv[1]; print('\n'.join(str(a['id']) for a in json.load(sys.stdin) if a.get('name')==asset_name))" "$name")
             for aid in $del_ids; do
-              code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H "$auth" "$API/releases/$id/assets/$aid")
+              code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H "$auth" "$API/releases/assets/$aid")
               echo "Deleted stale asset id $aid (HTTP $code)"
             done
             # Bundle names contain a space ("Google Messages_..."); encode it
-            # for the query string.
+            # for the query string. GitHub wants a raw binary upload, not the
+            # multipart form Gitea's asset API took.
             code=$(curl -sS -o "$resp" -w '%{http_code}' -X POST -H "$auth" \
-              --form "attachment=@$f" \
-              "$API/releases/$id/assets?name=${name// /%20}")
+              -H 'Content-Type: application/octet-stream' \
+              --data-binary "@$f" \
+              "$UPLOAD/releases/$id/assets?name=${name// /%20}")
             if [ "$code" != "201" ]; then
               echo "Upload of $name failed (HTTP $code):"
               cat "$resp"
@@ -181,3 +198,11 @@ jobs:
             fi
             echo "Uploaded asset: $name"
           done
+
+          # Read the release back and verify every expected asset name exists.
+          code=$(curl -sS -o "$resp" -w '%{http_code}' -H "$auth" "$API/releases/$id/assets?per_page=100")
+          if [ "$code" != "200" ]; then
+            echo "Asset listing failed (HTTP $code):"
+            cat "$resp"; exit 1
+          fi
+          python3 -c "import json,sys; a=json.load(open(sys.argv[1])); e=sorted(f.rsplit('/',1)[-1] for f in sys.argv[3:]); h=sorted(x['name'] for x in a); m=[n for n in e if n not in h]; print(('FAILED' if m else 'PASSED'), sys.argv[2], 'expected', e, 'missing', m); sys.exit(1 if m else 0)" "$resp" "$OS" "${artifacts[@]}"

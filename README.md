@@ -4,6 +4,14 @@ A lightweight, cross-platform desktop wrapper for [Google Messages](https://mess
 built with [Tauri](https://tauri.app) — it uses the OS-native webview instead of
 bundling Chromium, so the app stays small.
 
+> Unofficial — not affiliated with or endorsed by Google. "Google Messages" is a
+> trademark of Google LLC.
+
+Every desktop Google Messages wrapper I could find was either a bundled-Chromium
+Electron app (heavy, most unmaintained) or a bare webview window with no
+notifications or tray behavior. This one aims at the gap in between: small,
+native-feeling, and complete as a desktop citizen.
+
 ## Features
 
 - Native window wrapping `messages.google.com`
@@ -131,3 +139,7 @@ Bundles land in `src-tauri/target/<target-triple>/release/bundle/`.
 - **macOS / Linux** present a Safari user-agent; **Windows** keeps WebView2's
   native Edge user-agent.
 - **Linux** calls require a working PipeWire/PulseAudio stack at runtime.
+
+## License
+
+[MIT](LICENSE).

@@ -2,20 +2,31 @@ name: build-artifacts
 
 # Every push to the build branches produces downloadable artifacts on this
 # workflow's run page: per-arch Windows NSIS installers, deb/rpm, and the
-# macOS dmg. Superseded runs cancel themselves, so the latest push always
-# wins without stampeding the runners.
+# macOS dmg, posted to one stable rolling snapshots release. Superseded runs
+# cancel themselves, so the latest push always wins.
+#
+# GitHub primary: Gitea receives this repo as a backup mirror and has no
+# native Windows runner, so the job is gated on github.server_url and a
+# Gitea push skips it cleanly. To restore Gitea packaging, restore the
+# cross-compile flavor (runs-on windows-cross-latest, --runner cargo-xwin,
+# the Gitea asset API) from this file's git history and drop the gate.
 
 on:
   push:
     branches: [main, v1.5]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 concurrency:
-  group: artifacts-${{ gitea.ref }}
+  group: artifacts-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   packages:
+    name: Packages (${{ matrix.os }}${{ matrix.tarch && format(' {0}', matrix.tarch) || '' }})
+    if: github.server_url == 'https://github.com'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -23,10 +34,10 @@ jobs:
         include:
           - os: ubuntu-latest
             targets: deb,rpm
-          - os: windows-cross-latest
+          - os: windows-latest
             targets: nsis
             tarch: x86_64-pc-windows-msvc
-          - os: windows-cross-latest
+          - os: windows-latest
             targets: nsis
             tarch: aarch64-pc-windows-msvc
           - os: macos-latest
@@ -43,45 +54,46 @@ jobs:
             libwebkit2gtk-4.1-dev build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
       - uses: Swatinem/rust-cache@v2
-        if: matrix.os == 'ubuntu-latest'
         with:
           workspaces: src-tauri
-      # All legs run this: on mac it verifies rustup fast AND puts cargo on the
-      # launchd PATH (which lacks ~/.cargo/bin — without it tauri can't run
-      # `cargo metadata` and the leg dies in a second).
+      # All legs run this: on mac it puts cargo on the PATH; on Windows the
+      # matrix target is the MSVC arch the packaging leg builds for.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.tarch }}
       - name: Build (Linux deb/rpm)
         if: matrix.os == 'ubuntu-latest'
         run: npm run tauri build -- -b deb,rpm
-      # windows-cross-latest is a Linux container: cargo-xwin links against the
-      # MSVC SDK and makensis builds the installer, so no Windows host is needed.
-      - name: Build (Windows cross, nsis)
-        if: matrix.os == 'windows-cross-latest'
-        run: npm run tauri build -- -b nsis --runner cargo-xwin --target ${{ matrix.tarch }}
+      # Native Windows runners; see release.yml for the WoA emulation note.
+      - name: Build (Windows nsis)
+        if: matrix.os == 'windows-latest'
+        run: npm run tauri build -- -b nsis --target ${{ matrix.tarch }}
       # Ad-hoc signed (signingIdentity "-" in tauri.conf.json), not notarized.
       - name: Build (macOS dmg)
         if: matrix.os == 'macos-latest'
         run: npm run tauri build -- -b dmg
+
       - name: Post artifacts to the snapshots release
         shell: bash
         env:
           OS: ${{ matrix.os }}
           TARCH: ${{ matrix.tarch }}
-          REF: ${{ gitea.ref }}
+          REF: ${{ github.ref }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          API: https://gitea.eabev.com/api/v1/repos/eric/Google-Messages
+          API: https://api.github.com/repos/${{ github.repository }}
+          UPLOAD: https://uploads.github.com/repos/${{ github.repository }}
         run: |
           set -euo pipefail
           # Stable rolling page: one snapshots release, replaced per push. It
-          # deliberately does NOT carry the crate version — that still says
-          # 1.4.0 on this branch and would rename the page every bump.
+          # deliberately does NOT carry the crate version — it is a rolling
+          # page, not a version snapshot.
           snaptag="snapshots"
           case "$OS" in
             ubuntu-latest)
               base="src-tauri/target/release/bundle"
               set -- "$base/deb/"*.deb "$base/rpm/"*.rpm
               ;;
-            windows-cross-latest)
+            windows-latest)
               set -- "src-tauri/target/${{ matrix.tarch }}/release/bundle/nsis/"*-setup.exe
               ;;
             macos-latest)
@@ -90,7 +102,7 @@ jobs:
             *) echo "Unknown matrix.os: $OS"; exit 1 ;;
           esac
           [ -e "$1" ] || { echo "No artifacts built for $OS"; exit 1; }
-          auth="Authorization: token $TOKEN"
+          auth="Authorization: Bearer $TOKEN"
           resp=$(mktemp)
           code=$(curl -sS -o "$resp" -w '%{http_code}' -H "$auth" "$API/releases/tags/$snaptag")
           if [ "$code" = "404" ]; then
@@ -98,7 +110,8 @@ jobs:
               -H "$auth" -H 'Content-Type: application/json' \
               -d "{\"tag_name\":\"$snaptag\",\"name\":\"$snaptag\",\"body\":\"rolling build of $REF\",\"prerelease\":true}" \
               "$API/releases")
-            if [ "$code" = "409" ]; then
+            # GitHub answers 422 (not 409) when the tag already has a release.
+            if [ "$code" = "422" ] || [ "$code" = "409" ]; then
               echo "Release created concurrently, re-reading it"
               code=$(curl -sS -o "$resp" -w '%{http_code}' -H "$auth" "$API/releases/tags/$snaptag")
             fi
@@ -117,15 +130,24 @@ jobs:
             assets_json="$(curl -sS -H "$auth" "$API/releases/$id/assets")"
             del_ids=$(printf '%s' "$assets_json" | python3 -c "import json,sys; asset_name=sys.argv[1]; [print(a['id']) for a in json.load(sys.stdin) if a.get('name')==asset_name]" "$name")
             for aid in $del_ids; do
-              dcode=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H "$auth" "$API/releases/$id/assets/$aid")
+              dcode=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H "$auth" "$API/releases/assets/$aid")
               echo "Deleted stale asset id $aid (HTTP $dcode)"
             done
             ucode=$(curl -sS -o "$resp" -w '%{http_code}' -X POST -H "$auth" \
-              --form "attachment=@$f" \
-              "$API/releases/$id/assets?name=${name// /%20}")
+              -H 'Content-Type: application/octet-stream' \
+              --data-binary "@$f" \
+              "$UPLOAD/releases/$id/assets?name=${name// /%20}")
             if [ "$ucode" != "201" ]; then
               echo "Upload of $name failed (HTTP $ucode):"
               cat "$resp"; exit 1
             fi
             echo "Uploaded asset: $name"
           done
+
+          # Read the release back and verify every expected asset name exists.
+          code=$(curl -sS -o "$resp" -w '%{http_code}' -H "$auth" "$API/releases/$id/assets?per_page=100")
+          if [ "$code" != "200" ]; then
+            echo "Asset listing failed (HTTP $code):"
+            cat "$resp"; exit 1
+          fi
+          python3 -c "import json,sys; a=json.load(open(sys.argv[1])); e=sorted(f.rsplit('/',1)[-1] for f in sys.argv[3:]); h=sorted(x['name'] for x in a); m=[n for n in e if n not in h]; print(('FAILED' if m else 'PASSED'), sys.argv[2], 'expected', e, 'missing', m); sys.exit(1 if m else 0)" "$resp" "$OS" "$@"
